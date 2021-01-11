@@ -1,12 +1,14 @@
 mod config;
 mod coordinatord;
 use crate::{config::Config, coordinatord::CoordinatorD};
+use revault_net::noise::{NoisePrivKey, NoisePubKey};
 
-use std::{env, path::PathBuf, process, str::FromStr};
+use std::{env, fs, io::Read, net::TcpListener, path::PathBuf, process, str::FromStr};
 
 use daemonize_simple::Daemonize;
-use tokio::{net::TcpListener, runtime::Builder as RuntimeBuilder};
+use tokio::runtime::Builder as RuntimeBuilder;
 
+// No need for complex argument parsing: we only ever accept one, "--conf".
 fn parse_args(args: Vec<String>) -> Option<PathBuf> {
     if args.len() == 1 {
         return None;
@@ -48,13 +50,84 @@ fn setup_logger(
     Ok(())
 }
 
-async fn tokio_main(coordinatord: CoordinatorD) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(coordinatord.listen).await?;
+enum MessageSender {
+    Manager,
+    StakeHolder,
+    WatchTower,
+}
+
+async fn tokio_main(
+    coordinatord: CoordinatorD,
+    noise_secret: NoisePrivKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client_pubkeys: Vec<NoisePubKey> = coordinatord
+        .managers_keys
+        .clone()
+        .into_iter()
+        .chain(coordinatord.stakeholders_keys.clone().into_iter())
+        .chain(coordinatord.watchtowers_keys.clone().into_iter())
+        .collect();
+    let managers_keys = coordinatord.managers_keys;
+    let stakeholders_keys = coordinatord.stakeholders_keys;
+    let watchtowers_keys = coordinatord.watchtowers_keys;
+    // FIXME: implement a tokio feature upstream and use Tokio's TcpListener
+    let listener = TcpListener::bind(coordinatord.listen)?;
 
     loop {
-        let (_, _) = listener.accept().await?;
+        // This does the Noise KK handshake..
+        let kk_stream =
+            revault_net::transport::KKTransport::accept(&listener, &noise_secret, &client_pubkeys);
 
-        tokio::spawn(async move { () });
+        match kk_stream {
+            // .. So from here we are automagically using an AEAD stream
+            Ok(mut stream) => {
+                // Now figure out who's talking to us
+                let their_pubkey = stream.remote_static();
+                let msg_sender = if managers_keys.contains(&their_pubkey) {
+                    MessageSender::Manager
+                } else if stakeholders_keys.contains(&their_pubkey) {
+                    MessageSender::StakeHolder
+                } else if watchtowers_keys.contains(&their_pubkey) {
+                    MessageSender::WatchTower
+                } else {
+                    unreachable!("An unknown key was able to perform the handshake?")
+                };
+
+                tokio::spawn(async move {
+                    // Now, process all messages from this connection.
+                    loop {
+                        let msg = stream.read();
+                        match msg {
+                            Ok(msg) => {
+                                // read() is nice: on non-fatal error (basically connection
+                                // interruption) it'll just signal it by returning an empty
+                                // buffer.
+                                if msg.is_empty() {
+                                    break;
+                                }
+
+                                match msg_sender {
+                                    MessageSender::Manager => unimplemented!(),
+                                    MessageSender::StakeHolder => unimplemented!(),
+                                    MessageSender::WatchTower => unimplemented!(),
+                                }
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "Reading error from '{:x?}': '{}'",
+                                    stream.remote_static(),
+                                    e
+                                );
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                log::error!("Accepting new connection: '{}'", e);
+            }
+        }
     }
 }
 
@@ -96,6 +169,23 @@ fn main() {
         process::exit(1);
     });
 
+    // Our static noise private key. It needs to be hot, as we use it to decrypt every
+    // incoming message.
+    let mut noise_secret_fd = fs::File::open(coordinatord.secret_file()).unwrap_or_else(|e| {
+        eprintln!("Error opening Noise static private key file: '{}'", e);
+        process::exit(1);
+    });
+    let mut noise_secret = NoisePrivKey([0; 32]);
+    noise_secret_fd
+        .read_exact(&mut noise_secret.0)
+        .unwrap_or_else(|e| {
+            eprintln!("Error reading Noise static private key file: '{}'", e);
+            process::exit(1);
+        });
+    assert!(noise_secret.0 != [0; 32]);
+
+    // We use tokio for async processing and io (which we don't even fully implement
+    // yet.. But hey that'd be a nice FIXME as a first contribution for upstream :))
     let rt = RuntimeBuilder::new_multi_thread()
         .enable_all()
         .thread_name("revault_coordinatord_worker")
@@ -118,8 +208,9 @@ fn main() {
         });
     }
 
-    rt.block_on(tokio_main(coordinatord)).unwrap_or_else(|e| {
-        log::error!("Error in event loop: {}", e);
-        process::exit(1);
-    });
+    rt.block_on(tokio_main(coordinatord, noise_secret))
+        .unwrap_or_else(|e| {
+            log::error!("Error in event loop: {}", e);
+            process::exit(1);
+        });
 }

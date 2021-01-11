@@ -47,6 +47,7 @@ impl CoordinatorD {
         let daemon = config.daemon.unwrap_or(false);
         let listen = config
             .listen
+            // Default port is decimal representation of ₿'s unicode number
             .unwrap_or_else(|| SocketAddr::from_str("127.0.0.1:8383").unwrap());
 
         Ok(CoordinatorD {
@@ -74,5 +75,9 @@ impl CoordinatorD {
 
     pub fn log_file(&self) -> PathBuf {
         self.file_from_datadir("log")
+    }
+
+    pub fn secret_file(&self) -> PathBuf {
+        self.file_from_datadir("noise_secret")
     }
 }
