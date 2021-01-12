@@ -17,6 +17,27 @@ fn get_sigs(shared_signature: &Arc<RwLock<SigCache>>, getsigs_msg: GetSigs) -> S
     }
 }
 
+// Watchtowers only fetch spend transactions from us, so in reality it is
+// process_getspendtx_message() here.
+pub fn process_watchtower_message(
+    spend_txs: &Arc<RwLock<SpendTxCache>>,
+    msg: Vec<u8>,
+) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+    let GetSpendTx { deposit_outpoint } = serde_json::from_slice::<GetSpendTx>(&msg)?;
+    let response =
+        if let Some(transaction) = spend_txs.read().unwrap().get(&deposit_outpoint).cloned() {
+            serde_json::to_vec(&SpendTx { transaction })?
+        } else {
+            // If we don't have it, return an empty array. At this point the watchtower
+            // will probably revault..
+            serde_json::to_vec(&SpendTx {
+                transaction: vec![],
+            })?
+        };
+
+    Ok(Some(response))
+}
+
 // Managers can poll pre-signed transaction signatures and set a spend transaction
 // for a given vault so watchtowers can poll it.
 pub fn process_manager_message(

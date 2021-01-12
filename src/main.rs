@@ -4,7 +4,9 @@ mod processing;
 use crate::{
     config::Config,
     coordinatord::CoordinatorD,
-    processing::{process_manager_message, process_stakeholder_message},
+    processing::{
+        process_manager_message, process_stakeholder_message, process_watchtower_message,
+    },
 };
 use revault_net::noise::{NoisePrivKey, NoisePubKey};
 
@@ -130,7 +132,9 @@ async fn tokio_main(
                                     MessageSender::StakeHolder => {
                                         process_stakeholder_message(&shared_sigs, msg)
                                     }
-                                    MessageSender::WatchTower => unimplemented!(),
+                                    MessageSender::WatchTower => {
+                                        process_watchtower_message(&spend_txs, msg)
+                                    }
                                 };
 
                                 // We close the connection on processing or response-writing
