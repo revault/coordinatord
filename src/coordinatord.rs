@@ -1,7 +1,7 @@
 use crate::config::{datadir_path, Config, ConfigError};
 
 use revault_net::{
-    bitcoin::{secp256k1::PublicKey, Txid},
+    bitcoin::{secp256k1::PublicKey, OutPoint, Txid},
     message::server::RevaultSignature,
     noise::NoisePubKey,
 };
@@ -12,6 +12,7 @@ use std::{
 };
 
 pub type SigCache = HashMap<Txid, HashMap<PublicKey, RevaultSignature>>;
+pub type SpendTxCache = HashMap<OutPoint, Vec<u8>>;
 
 pub struct CoordinatorD {
     // Noise communication keys
@@ -26,6 +27,7 @@ pub struct CoordinatorD {
 
     // Cache. FIXME: implement permanent storage
     pub stk_sigs: SigCache,
+    pub spend_txs: SpendTxCache,
 }
 
 pub fn noise_keys_from_strlist(
@@ -66,6 +68,7 @@ impl CoordinatorD {
             .unwrap_or_else(|| SocketAddr::from_str("127.0.0.1:8383").unwrap());
 
         let stk_sigs = HashMap::new();
+        let spend_txs = HashMap::new();
 
         Ok(CoordinatorD {
             managers_keys,
@@ -75,6 +78,7 @@ impl CoordinatorD {
             daemon,
             listen,
             stk_sigs,
+            spend_txs,
         })
     }
 

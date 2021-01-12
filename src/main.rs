@@ -1,7 +1,11 @@
 mod config;
 mod coordinatord;
 mod processing;
-use crate::{config::Config, coordinatord::CoordinatorD, processing::process_stakeholder_message};
+use crate::{
+    config::Config,
+    coordinatord::CoordinatorD,
+    processing::{process_manager_message, process_stakeholder_message},
+};
 use revault_net::noise::{NoisePrivKey, NoisePubKey};
 
 use std::{
@@ -82,6 +86,7 @@ async fn tokio_main(
     // FIXME: implement a tokio feature upstream and use Tokio's TcpListener
     let listener = TcpListener::bind(coordinatord.listen)?;
     let stk_sigs = Arc::new(RwLock::new(coordinatord.stk_sigs));
+    let spend_txs_cache = Arc::new(RwLock::new(coordinatord.spend_txs));
 
     loop {
         // This does the Noise KK handshake..
@@ -103,6 +108,7 @@ async fn tokio_main(
                     unreachable!("An unknown key was able to perform the handshake?")
                 };
                 let shared_sigs = stk_sigs.clone();
+                let spend_txs = spend_txs_cache.clone();
 
                 tokio::spawn(async move {
                     // Now, process all messages from this connection.
@@ -118,7 +124,9 @@ async fn tokio_main(
                                 }
 
                                 let response = match msg_sender {
-                                    MessageSender::Manager => unimplemented!(),
+                                    MessageSender::Manager => {
+                                        process_manager_message(&shared_sigs, &spend_txs, msg)
+                                    }
                                     MessageSender::StakeHolder => {
                                         process_stakeholder_message(&shared_sigs, msg)
                                     }
