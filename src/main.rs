@@ -1,9 +1,18 @@
 mod config;
 mod coordinatord;
-use crate::{config::Config, coordinatord::CoordinatorD};
+mod processing;
+use crate::{config::Config, coordinatord::CoordinatorD, processing::process_stakeholder_message};
 use revault_net::noise::{NoisePrivKey, NoisePubKey};
 
-use std::{env, fs, io::Read, net::TcpListener, path::PathBuf, process, str::FromStr};
+use std::{
+    env, fs,
+    io::Read,
+    net::TcpListener,
+    path::PathBuf,
+    process,
+    str::FromStr,
+    sync::{Arc, RwLock},
+};
 
 use daemonize_simple::Daemonize;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -72,6 +81,7 @@ async fn tokio_main(
     let watchtowers_keys = coordinatord.watchtowers_keys;
     // FIXME: implement a tokio feature upstream and use Tokio's TcpListener
     let listener = TcpListener::bind(coordinatord.listen)?;
+    let stk_sigs = Arc::new(RwLock::new(coordinatord.stk_sigs));
 
     loop {
         // This does the Noise KK handshake..
@@ -92,6 +102,7 @@ async fn tokio_main(
                 } else {
                     unreachable!("An unknown key was able to perform the handshake?")
                 };
+                let shared_sigs = stk_sigs.clone();
 
                 tokio::spawn(async move {
                     // Now, process all messages from this connection.
@@ -106,10 +117,37 @@ async fn tokio_main(
                                     break;
                                 }
 
-                                match msg_sender {
+                                let response = match msg_sender {
                                     MessageSender::Manager => unimplemented!(),
-                                    MessageSender::StakeHolder => unimplemented!(),
+                                    MessageSender::StakeHolder => {
+                                        process_stakeholder_message(&shared_sigs, msg)
+                                    }
                                     MessageSender::WatchTower => unimplemented!(),
+                                };
+
+                                // We close the connection on processing or response-writing
+                                // error.
+                                match response {
+                                    Ok(Some(response)) => {
+                                        if let Err(e) = stream.write(&response) {
+                                            log::error!(
+                                                "Writing response '{:x?}' to '{:x?}': '{}'",
+                                                response,
+                                                stream.remote_static(),
+                                                e
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        log::error!(
+                                            "Processing message from '{:x?}': '{}'",
+                                            stream.remote_static(),
+                                            e
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                             Err(e) => {
