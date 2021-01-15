@@ -178,8 +178,7 @@ pub async fn fetch_spend_tx(
             &[&outpoint.txid.as_ref(), &(outpoint.vout as i32)],
         )
         .await?
-        .iter()
-        .next()
+        .get(0)
         .map(|row| row.get::<_, Vec<u8>>(0));
 
     Ok(spend_tx)

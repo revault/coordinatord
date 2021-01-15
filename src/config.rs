@@ -54,17 +54,18 @@ fn config_file_path() -> Result<PathBuf, ConfigError> {
     })
 }
 
-fn sanity_check_pubkey_set(pubkeys_str: &Vec<String>, entity: &str) -> Result<(), ConfigError> {
-    const HEX_CHARS: &'static str = "0123456789abcdef";
+fn sanity_check_pubkey_set(pubkeys_str: &[String], entity: &str) -> Result<(), ConfigError> {
+    const HEX_CHARS: &str = "0123456789abcdef";
 
     if pubkeys_str.is_empty() {
         return Err(ConfigError(format!("Need at least one {}.", entity)));
     }
 
-    if pubkeys_str.iter().any(|pk| {
+    let invalid_pubkey = pubkeys_str.iter().any(|pk| {
         pk.len() != NOISE_KEY_SIZE * 2
             || pk.to_lowercase().find(|c| !HEX_CHARS.contains(c)).is_some()
-    }) {
+    });
+    if invalid_pubkey {
         eprintln!(
             "{}",
             pubkeys_str.iter().any(|pk| pk.len() != NOISE_KEY_SIZE)
