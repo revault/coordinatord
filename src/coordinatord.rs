@@ -1,5 +1,4 @@
 use crate::config::{datadir_path, Config, ConfigError};
-
 use revault_net::{
     bitcoin::{secp256k1::PublicKey, OutPoint, Txid},
     message::server::RevaultSignature,
@@ -26,6 +25,7 @@ pub struct CoordinatorD {
     pub listen: SocketAddr,
 
     // Cache. FIXME: implement permanent storage
+    pub postgres_config: tokio_postgres::Config,
     pub stk_sigs: SigCache,
     pub spend_txs: SpendTxCache,
 }
@@ -70,6 +70,8 @@ impl CoordinatorD {
         let stk_sigs = HashMap::new();
         let spend_txs = HashMap::new();
 
+        let postgres_config = tokio_postgres::Config::from_str(&config.postgre_uri)?;
+
         Ok(CoordinatorD {
             managers_keys,
             stakeholders_keys,
@@ -77,6 +79,7 @@ impl CoordinatorD {
             data_dir,
             daemon,
             listen,
+            postgres_config,
             stk_sigs,
             spend_txs,
         })

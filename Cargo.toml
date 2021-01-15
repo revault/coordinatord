@@ -5,7 +5,7 @@ authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
-revault_net = { git = "https://github.com/re-vault/revault_net" }
+revault_net = { path = "../revault_net" }
 
 tokio = { version = "1.0", features = ["io-util",  "macros", "net", "rt-multi-thread"] }
 
@@ -23,3 +23,8 @@ daemonize-simple = "0.1.4"
 log = "0.4"
 fern = "0.5"
 chrono = "0.4"
+
+tokio-postgres = "0.7.0"
+
+[dev-dependencies]
+revault_tx = { git = "https://github.com/re-vault/revault_tx", features = ["use-serde"] }

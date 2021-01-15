@@ -1,24 +1,21 @@
 mod config;
 mod coordinatord;
+mod db;
 mod processing;
 use crate::{
     config::Config,
     coordinatord::CoordinatorD,
+    db::maybe_create_db,
     processing::{
         process_manager_message, process_stakeholder_message, process_watchtower_message,
     },
 };
-use revault_net::noise::{NoisePrivKey, NoisePubKey};
-
-use std::{
-    env, fs,
-    io::Read,
-    net::TcpListener,
-    path::PathBuf,
-    process,
-    str::FromStr,
-    sync::{Arc, RwLock},
+use revault_net::{
+    noise::{NoisePrivKey, NoisePubKey},
+    transport::KKTransport,
 };
+
+use std::{env, fs, io::Read, net::TcpListener, path::PathBuf, process, str::FromStr, sync::Arc};
 
 use daemonize_simple::Daemonize;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -71,24 +68,92 @@ enum MessageSender {
     WatchTower,
 }
 
+// Process all messages from this connection
+async fn connection_handler(
+    mut stream: KKTransport,
+    msg_sender: MessageSender,
+    pg_config: Arc<tokio_postgres::Config>,
+) {
+    loop {
+        match stream.read() {
+            Ok(msg) => {
+                // read() is nice: on non-fatal error (basically connection
+                // interruption) it'll just signal it by returning an empty
+                // buffer.
+                if msg.is_empty() {
+                    return;
+                }
+
+                let response = match msg_sender {
+                    MessageSender::Manager => process_manager_message(&*pg_config, msg).await,
+                    MessageSender::StakeHolder => {
+                        process_stakeholder_message(&*pg_config, msg).await
+                    }
+                    MessageSender::WatchTower => process_watchtower_message(&*pg_config, msg).await,
+                };
+
+                // We close the connection on processing or response-writing
+                // error.
+                match response {
+                    Ok(Some(response)) => {
+                        if let Err(e) = stream.write(&response) {
+                            log::error!(
+                                "Writing response '{:x?}' to '{:x?}': '{}'",
+                                response,
+                                stream.remote_static(),
+                                e
+                            );
+                            return;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::error!(
+                            "Processing message from '{:x?}': '{}'",
+                            stream.remote_static(),
+                            e
+                        );
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!(
+                    "Reading error from '{:x?}': '{}'",
+                    stream.remote_static(),
+                    e
+                );
+                return;
+            }
+        }
+    }
+}
+
 async fn tokio_main(
     coordinatord: CoordinatorD,
     noise_secret: NoisePrivKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client_pubkeys: Vec<NoisePubKey> = coordinatord
-        .managers_keys
-        .clone()
-        .into_iter()
-        .chain(coordinatord.stakeholders_keys.clone().into_iter())
-        .chain(coordinatord.watchtowers_keys.clone().into_iter())
-        .collect();
+    // We use PostgreSQL for storing the signatures and spend transactions. That may
+    // seem overkill for now, but this server is expected to grow and we'll probably
+    // use more Postgre feature soon. For one, Postgre makes it easy to setup database
+    // replication.
+    maybe_create_db(&coordinatord.postgres_config).await?;
+    let postgres_config = Arc::new(coordinatord.postgres_config);
+
+    // Who we are accepting connections from. Note that we of course trust them and
+    // therefore don't make a big deal of DOS protection.
     let managers_keys = coordinatord.managers_keys;
     let stakeholders_keys = coordinatord.stakeholders_keys;
     let watchtowers_keys = coordinatord.watchtowers_keys;
+    let client_pubkeys: Vec<NoisePubKey> = managers_keys
+        .clone()
+        .into_iter()
+        .chain(stakeholders_keys.clone().into_iter())
+        .chain(watchtowers_keys.clone().into_iter())
+        .collect();
+
     // FIXME: implement a tokio feature upstream and use Tokio's TcpListener
     let listener = TcpListener::bind(coordinatord.listen)?;
-    let stk_sigs = Arc::new(RwLock::new(coordinatord.stk_sigs));
-    let spend_txs_cache = Arc::new(RwLock::new(coordinatord.spend_txs));
 
     loop {
         // This does the Noise KK handshake..
@@ -97,7 +162,7 @@ async fn tokio_main(
 
         match kk_stream {
             // .. So from here we are automagically using an AEAD stream
-            Ok(mut stream) => {
+            Ok(stream) => {
                 // Now figure out who's talking to us
                 let their_pubkey = stream.remote_static();
                 let msg_sender = if managers_keys.contains(&their_pubkey) {
@@ -109,70 +174,11 @@ async fn tokio_main(
                 } else {
                     unreachable!("An unknown key was able to perform the handshake?")
                 };
-                let shared_sigs = stk_sigs.clone();
-                let spend_txs = spend_txs_cache.clone();
+                let pg_config = postgres_config.clone();
 
-                tokio::spawn(async move {
-                    // Now, process all messages from this connection.
-                    loop {
-                        let msg = stream.read();
-                        match msg {
-                            Ok(msg) => {
-                                // read() is nice: on non-fatal error (basically connection
-                                // interruption) it'll just signal it by returning an empty
-                                // buffer.
-                                if msg.is_empty() {
-                                    break;
-                                }
-
-                                let response = match msg_sender {
-                                    MessageSender::Manager => {
-                                        process_manager_message(&shared_sigs, &spend_txs, msg)
-                                    }
-                                    MessageSender::StakeHolder => {
-                                        process_stakeholder_message(&shared_sigs, msg)
-                                    }
-                                    MessageSender::WatchTower => {
-                                        process_watchtower_message(&spend_txs, msg)
-                                    }
-                                };
-
-                                // We close the connection on processing or response-writing
-                                // error.
-                                match response {
-                                    Ok(Some(response)) => {
-                                        if let Err(e) = stream.write(&response) {
-                                            log::error!(
-                                                "Writing response '{:x?}' to '{:x?}': '{}'",
-                                                response,
-                                                stream.remote_static(),
-                                                e
-                                            );
-                                            break;
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        log::error!(
-                                            "Processing message from '{:x?}': '{}'",
-                                            stream.remote_static(),
-                                            e
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::error!(
-                                    "Reading error from '{:x?}': '{}'",
-                                    stream.remote_static(),
-                                    e
-                                );
-                                break;
-                            }
-                        }
-                    }
-                });
+                tokio::spawn(
+                    async move { connection_handler(stream, msg_sender, pg_config).await },
+                );
             }
             Err(e) => {
                 log::error!("Accepting new connection: '{}'", e);

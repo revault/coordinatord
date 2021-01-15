@@ -13,6 +13,9 @@ pub struct Config {
     pub stakeholders: Vec<String>,
     /// The watchtowers Noise static public keys
     pub watchtowers: Vec<String>,
+    /// PostgreSQL database connection URI, as specified in
+    /// https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING
+    pub postgre_uri: String,
     /// An optional custom data directory
     pub data_dir: Option<PathBuf>,
     /// Whether to daemonize the process
@@ -120,6 +123,7 @@ mod tests {
             daemon = true
             data_dir = "/home/wizardsardine/custom/folder/"
             listen = "127.0.0.1:11111"
+            postgre_uri = "postgresql://user:secret@localhost"
 
             # Note: these are secp256k1 points and are (very) likely invalid 25519 points! But we don't check it here (neither does Noise, actually.)
             managers = ["61feafb2db96bf650b496c74c24ce92fa608e271b4092405f3364c9f8466df66", "b7f56d2b69ea6d8ae0c6e0fb6a7b85a03493bb0771e1b06a69f5f45c017512a9"]
