@@ -62,6 +62,7 @@ fn setup_logger(
     Ok(())
 }
 
+#[derive(Debug)]
 enum MessageSender {
     Manager,
     StakeHolder,
@@ -81,8 +82,10 @@ async fn connection_handler(
                 // interruption) it'll just signal it by returning an empty
                 // buffer.
                 if msg.is_empty() {
+                    log::trace!("Empty message, connection was ended by peer.");
                     return;
                 }
+                log::trace!("Got message {:x?} from {:?}", msg, msg_sender);
 
                 let response = match msg_sender {
                     MessageSender::Manager => process_manager_message(&*pg_config, msg).await,
@@ -91,6 +94,7 @@ async fn connection_handler(
                     }
                     MessageSender::WatchTower => process_watchtower_message(&*pg_config, msg).await,
                 };
+                log::trace!("Responding with {:x?}", response);
 
                 // We close the connection on processing or response-writing
                 // error.
@@ -175,6 +179,11 @@ async fn tokio_main(
                     unreachable!("An unknown key was able to perform the handshake?")
                 };
                 let pg_config = postgres_config.clone();
+                log::trace!(
+                    "Got a new connection from a {:?} with key {:x?}",
+                    msg_sender,
+                    their_pubkey
+                );
 
                 tokio::spawn(
                     async move { connection_handler(stream, msg_sender, pg_config).await },
