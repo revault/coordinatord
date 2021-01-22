@@ -70,7 +70,7 @@ impl CoordinatorD {
         let stk_sigs = HashMap::new();
         let spend_txs = HashMap::new();
 
-        let postgres_config = tokio_postgres::Config::from_str(&config.postgre_uri)?;
+        let postgres_config = tokio_postgres::Config::from_str(&config.postgres_uri)?;
 
         Ok(CoordinatorD {
             managers_keys,

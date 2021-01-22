@@ -1,6 +1,6 @@
 pub const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS version (
-    version INTEGER NOT NULL
+    version INTEGER UNIQUE NOT NULL
 );
 
 -- If the encryption_key is not NULL, then the signature is encrypted.
