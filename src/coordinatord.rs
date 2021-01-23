@@ -1,17 +1,7 @@
 use crate::config::{datadir_path, Config, ConfigError};
-use revault_net::{
-    bitcoin::{secp256k1::PublicKey, OutPoint, Txid},
-    message::server::RevaultSignature,
-    noise::NoisePubKey,
-};
+use revault_net::noise::NoisePubKey;
 
-use std::{
-    collections::HashMap, fs, net::SocketAddr, os::unix::fs::DirBuilderExt, path::PathBuf,
-    str::FromStr,
-};
-
-pub type SigCache = HashMap<Txid, HashMap<PublicKey, RevaultSignature>>;
-pub type SpendTxCache = HashMap<OutPoint, Vec<u8>>;
+use std::{fs, net::SocketAddr, os::unix::fs::DirBuilderExt, path::PathBuf, str::FromStr};
 
 pub struct CoordinatorD {
     // Noise communication keys
@@ -24,10 +14,8 @@ pub struct CoordinatorD {
     pub daemon: bool,
     pub listen: SocketAddr,
 
-    // Cache. FIXME: implement permanent storage
+    // For storing the signatures and spend transactions
     pub postgres_config: tokio_postgres::Config,
-    pub stk_sigs: SigCache,
-    pub spend_txs: SpendTxCache,
 }
 
 pub fn noise_keys_from_strlist(
@@ -67,9 +55,6 @@ impl CoordinatorD {
             // Default port is decimal representation of ₿'s unicode number
             .unwrap_or_else(|| SocketAddr::from_str("127.0.0.1:8383").unwrap());
 
-        let stk_sigs = HashMap::new();
-        let spend_txs = HashMap::new();
-
         let postgres_config = tokio_postgres::Config::from_str(&config.postgres_uri)?;
 
         Ok(CoordinatorD {
@@ -80,8 +65,6 @@ impl CoordinatorD {
             daemon,
             listen,
             postgres_config,
-            stk_sigs,
-            spend_txs,
         })
     }
 
