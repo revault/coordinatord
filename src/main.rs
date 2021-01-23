@@ -11,11 +11,22 @@ use crate::{
     },
 };
 use revault_net::{
+    bitcoin::hashes::hex::ToHex,
     noise::{NoisePrivKey, NoisePubKey},
+    sodiumoxide,
     transport::KKTransport,
 };
 
-use std::{env, fs, io::Read, net::TcpListener, path::PathBuf, process, str::FromStr, sync::Arc};
+use std::{
+    env, fs,
+    io::{Read, Write},
+    net::TcpListener,
+    os::unix::fs::OpenOptionsExt,
+    path::PathBuf,
+    process,
+    str::FromStr,
+    sync::Arc,
+};
 
 use daemonize_simple::Daemonize;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -60,6 +71,53 @@ fn setup_logger(
     }
 
     Ok(())
+}
+
+// The communication are (for now) hot, so we just create it ourselves on first run.
+fn read_or_create_noise_key(secret_file: PathBuf) -> NoisePrivKey {
+    let mut noise_secret = NoisePrivKey([0; 32]);
+
+    if !secret_file.as_path().exists() {
+        log::info!(
+            "No Noise private key at '{:?}', generating a new one",
+            secret_file
+        );
+
+        sodiumoxide::init().unwrap_or_else(|_| {
+            eprintln!("Error initializing libsodium.");
+            process::exit(1);
+        });
+        noise_secret
+            .0
+            .copy_from_slice(&sodiumoxide::randombytes::randombytes(32));
+        let mut options = fs::OpenOptions::new();
+        // We create it in read-only but open it in write only.
+        options.write(true).create_new(true).mode(0o400);
+        let mut fd = options.open(secret_file.clone()).unwrap_or_else(|e| {
+            eprintln!("Opening Noise private key file: {}", e);
+            process::exit(1);
+        });
+        fd.write_all(&noise_secret.0).unwrap_or_else(|e| {
+            eprintln!("Writing Noise private key to '{:?}': '{}'", secret_file, e);
+            process::exit(1);
+        });
+    } else {
+        let mut noise_secret_fd = fs::File::open(secret_file).unwrap_or_else(|e| {
+            eprintln!("Error opening Noise static private key file: '{}'", e);
+            process::exit(1);
+        });
+        noise_secret_fd
+            .read_exact(&mut noise_secret.0)
+            .unwrap_or_else(|e| {
+                eprintln!("Error reading Noise static private key file: '{}'", e);
+                process::exit(1);
+            });
+    }
+
+    // TODO: have a decent memory management and mlock() the key
+
+    assert!(noise_secret.0 != [0; 32]);
+    noise_secret
 }
 
 #[derive(Debug)]
@@ -236,18 +294,7 @@ fn main() {
 
     // Our static noise private key. It needs to be hot, as we use it to decrypt every
     // incoming message.
-    let mut noise_secret_fd = fs::File::open(coordinatord.secret_file()).unwrap_or_else(|e| {
-        eprintln!("Error opening Noise static private key file: '{}'", e);
-        process::exit(1);
-    });
-    let mut noise_secret = NoisePrivKey([0; 32]);
-    noise_secret_fd
-        .read_exact(&mut noise_secret.0)
-        .unwrap_or_else(|e| {
-            eprintln!("Error reading Noise static private key file: '{}'", e);
-            process::exit(1);
-        });
-    assert!(noise_secret.0 != [0; 32]);
+    let noise_secret = read_or_create_noise_key(coordinatord.secret_file());
 
     // We use tokio for async processing and io (which we don't even fully implement
     // yet.. But hey that'd be a nice FIXME as a first contribution for upstream :))
@@ -260,7 +307,11 @@ fn main() {
             process::exit(1);
         });
 
-    println!("Started revault_coordinatord");
+    let noise_pubkey_hex = noise_secret.pubkey().0.to_hex();
+    println!(
+        "Started revault_coordinatord with Noise pubkey: {:x?}",
+        noise_pubkey_hex
+    );
     if coordinatord.daemon {
         let daemon = Daemonize {
             // TODO: Make this configurable for inits
