@@ -73,7 +73,7 @@ fn setup_logger(
     Ok(())
 }
 
-// The communication are (for now) hot, so we just create it ourselves on first run.
+// The communication keys are (for now) hot, so we just create it ourselves on first run.
 fn read_or_create_noise_key(secret_file: PathBuf) -> NoisePrivKey {
     let mut noise_secret = NoisePrivKey([0; 32]);
 
@@ -309,7 +309,7 @@ fn main() {
 
     let noise_pubkey_hex = noise_secret.pubkey().0.to_hex();
     println!(
-        "Started revault_coordinatord with Noise pubkey: {:x?}",
+        "Started revault_coordinatord with Noise pubkey: {}",
         noise_pubkey_hex
     );
     if coordinatord.daemon {
