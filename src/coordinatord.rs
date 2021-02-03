@@ -34,6 +34,7 @@ fn create_datadir(datadir_path: &PathBuf) -> Result<(), std::io::Error> {
 
 impl CoordinatorD {
     pub fn from_config(config: Config) -> Result<CoordinatorD, Box<dyn std::error::Error>> {
+        // FIXME: upstream should use sodiumoxide's Curve 25519
         let managers_keys = noise_keys_from_strlist(config.managers)?;
         let stakeholders_keys = noise_keys_from_strlist(config.stakeholders)?;
         let watchtowers_keys = noise_keys_from_strlist(config.watchtowers)?;

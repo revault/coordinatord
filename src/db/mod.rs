@@ -5,12 +5,38 @@ use revault_net::{
         OutPoint, Txid,
     },
     message::server::{RevaultSignature, Sigs},
+    sodiumoxide::crypto::box_::PublicKey as Curve25519Pubkey,
 };
 use schema::SCHEMA;
 
-use std::collections::HashMap;
+use std::{collections::BTreeMap, fmt};
 
 use tokio_postgres::{types::Type, Client, NoTls};
+
+#[derive(Debug)]
+pub enum DbError {
+    /// An error originating from the Postgres backend
+    Postgres(tokio_postgres::Error),
+    /// Trying to insert the same data twice
+    Duplicate,
+}
+
+impl fmt::Display for DbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Postgres(e) => write!(f, "{}", e),
+            Self::Duplicate => write!(f, "Trying to insert a duplicated entry"),
+        }
+    }
+}
+
+impl std::error::Error for DbError {}
+
+impl From<tokio_postgres::Error> for DbError {
+    fn from(e: tokio_postgres::Error) -> Self {
+        Self::Postgres(e)
+    }
+}
 
 async fn establish_connection(
     config: &tokio_postgres::Config,
@@ -39,8 +65,20 @@ pub async fn store_plaintext_sig(
     txid: Txid,
     pubkey: PublicKey,
     signature: Signature,
-) -> Result<(), tokio_postgres::Error> {
+) -> Result<(), DbError> {
     let client = establish_connection(config).await?;
+    let sig = signature.serialize_der();
+
+    // Make sure it's not here already
+    let statement = client
+        .prepare_typed(
+            "SELECT signature FROM signatures WHERE signature = $1",
+            &[Type::BYTEA],
+        )
+        .await?;
+    if !client.query(&statement, &[&sig.as_ref()]).await?.is_empty() {
+        return Err(DbError::Duplicate);
+    }
 
     let statement = client
         .prepare_typed(
@@ -51,11 +89,7 @@ pub async fn store_plaintext_sig(
     client
         .execute(
             &statement,
-            &[
-                &txid.as_ref(),
-                &pubkey.serialize().as_ref(),
-                &signature.serialize_der().as_ref(),
-            ],
+            &[&txid.as_ref(), &pubkey.serialize().as_ref(), &sig.as_ref()],
         )
         .await?;
 
@@ -67,7 +101,7 @@ pub async fn store_encrypted_sig(
     txid: Txid,
     pubkey: PublicKey,
     signature: Vec<u8>,
-    encryption_pubkey: Vec<u8>,
+    encryption_pubkey: Curve25519Pubkey,
 ) -> Result<(), tokio_postgres::Error> {
     let client = establish_connection(config).await?;
 
@@ -85,7 +119,7 @@ pub async fn store_encrypted_sig(
                 &txid.as_ref(),
                 &pubkey.serialize().as_ref(),
                 &signature,
-                &encryption_pubkey,
+                &encryption_pubkey.0.as_ref(),
             ],
         )
         .await?;
@@ -98,7 +132,7 @@ pub async fn fetch_sigs(
     txid: Txid,
 ) -> Result<Sigs, tokio_postgres::Error> {
     let client = establish_connection(config).await?;
-    let mut signatures: HashMap<PublicKey, RevaultSignature> = HashMap::new();
+    let mut signatures: BTreeMap<PublicKey, RevaultSignature> = BTreeMap::new();
 
     let statement = client
         .prepare_typed(
@@ -107,17 +141,19 @@ pub async fn fetch_sigs(
         )
         .await?;
     for row in client.query(&statement, &[&txid.as_ref()]).await? {
-        let pubkey: Vec<u8> = row.get(0);
+        let pubkey: &[u8] = row.get(0);
         let pubkey = PublicKey::from_slice(&pubkey).expect("We input a compressed pubkey");
         let sig: Vec<u8> = row.get(1);
-        let encryption_key: Option<Vec<u8>> = row.get(2);
+        let encryption_key: Option<&[u8]> = row.get(2);
 
         if let Some(encryption_key) = encryption_key {
+            let encryption_key = Curve25519Pubkey::from_slice(&encryption_key)
+                .expect("We only store valid 32-bytes public keys");
             signatures.insert(
                 pubkey,
                 RevaultSignature::EncryptedSig {
                     encrypted_signature: sig,
-                    pubkey: encryption_key,
+                    encryption_key,
                 },
             );
         } else {
