@@ -143,7 +143,12 @@ async fn connection_handler(
                     log::trace!("Empty message, connection was ended by peer.");
                     return;
                 }
-                log::trace!("Got message {:x?} from {:?}", msg, msg_sender);
+                log::trace!(
+                    "Got message '{}' (raw: '{:x?}') from {:?}",
+                    String::from_utf8_lossy(&msg),
+                    msg,
+                    msg_sender
+                );
 
                 let response = match msg_sender {
                     MessageSender::Manager => process_manager_message(&*pg_config, msg).await,
@@ -152,12 +157,12 @@ async fn connection_handler(
                     }
                     MessageSender::WatchTower => process_watchtower_message(&*pg_config, msg).await,
                 };
-                log::trace!("Responding with {:x?}", response);
 
                 // We close the connection on processing or response-writing
                 // error.
                 match response {
                     Ok(Some(response)) => {
+                        log::trace!("Responding with {:x?}", response);
                         if let Err(e) = stream.write(&response) {
                             log::error!(
                                 "Writing response '{:x?}' to '{:x?}': '{}'",
@@ -312,6 +317,19 @@ fn main() {
         "Started revault_coordinatord with Noise pubkey: {}",
         noise_pubkey_hex
     );
+    log::debug!("Stakeholders keys:");
+    for k in coordinatord.stakeholders_keys.iter() {
+        log::debug!("   {}", k.0.to_hex());
+    }
+    log::debug!("Managers keys:");
+    for k in coordinatord.managers_keys.iter() {
+        log::debug!("   {}", k.0.to_hex());
+    }
+    log::debug!("Watchtowers keys:");
+    for k in coordinatord.watchtowers_keys.iter() {
+        log::debug!("   {}", k.0.to_hex());
+    }
+
     if coordinatord.daemon {
         let daemon = Daemonize {
             // TODO: Make this configurable for inits

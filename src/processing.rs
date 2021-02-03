@@ -47,6 +47,7 @@ pub async fn process_stakeholder_message(
     pg_config: &tokio_postgres::Config,
     msg: Vec<u8>,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+    log::trace!("Processing stakeholder message");
     match serde_json::from_slice::<FromStakeholder>(&msg)? {
         // We got a new signature for a pre-signed transaction. Just store it. If we can't
         // trust our own stakeholders, who can we trust?
@@ -60,7 +61,7 @@ pub async fn process_stakeholder_message(
                     store_plaintext_sig(&pg_config, id, pubkey, sig).await?;
                 }
                 RevaultSignature::EncryptedSig {
-                    pubkey: encryption_pubkey,
+                    encryption_key,
                     encrypted_signature,
                 } => {
                     store_encrypted_sig(
@@ -68,7 +69,7 @@ pub async fn process_stakeholder_message(
                         id,
                         pubkey,
                         encrypted_signature,
-                        encryption_pubkey,
+                        encryption_key,
                     )
                     .await?;
                 }
@@ -98,10 +99,11 @@ mod tests {
             OutPoint, Txid,
         },
         message::server::*,
+        sodiumoxide::crypto::box_::gen_keypair,
     };
     use revault_tx::transactions::{RevaultTransaction, SpendTransaction};
 
-    use std::{collections::HashMap, str::FromStr};
+    use std::{collections::BTreeMap, str::FromStr};
 
     use tokio::runtime::Builder as RuntimeBuilder;
     use tokio_postgres::tls::NoTls;
@@ -165,8 +167,9 @@ mod tests {
         let id2 =
             Txid::from_hex("6a276a96807dd45ceed9cbd6fd48b5edf185623b23339a1643e19e8dcbf2e474")
                 .unwrap();
+        let (encryption_key, _) = gen_keypair();
         let signature_2 = RevaultSignature::EncryptedSig {
-            pubkey: vec![2u8, 32],
+            encryption_key,
             encrypted_signature: vec![1u8; 71],
         };
         let encrypted_signature_1 = FromStakeholder::Sig(Sig {
@@ -183,8 +186,9 @@ mod tests {
         .is_none());
 
         // Another signature for the second txid
+        let (encryption_key, _) = gen_keypair();
         let signature_3 = RevaultSignature::EncryptedSig {
-            pubkey: vec![0u8, 32],
+            encryption_key,
             encrypted_signature: vec![4u8; 71],
         };
         let encrypted_signature_2 = FromStakeholder::Sig(Sig {
@@ -201,7 +205,7 @@ mod tests {
         .is_none());
 
         // Now fetch the sigs we just stored
-        let mut signatures = HashMap::with_capacity(1);
+        let mut signatures = BTreeMap::new();
         signatures.insert(pubkey, signature_1);
         assert_eq!(
             serde_json::from_slice::<Sigs>(
@@ -229,7 +233,7 @@ mod tests {
             Sigs { signatures }
         );
 
-        let mut signatures = HashMap::with_capacity(1);
+        let mut signatures = BTreeMap::new();
         signatures.insert(pubkey, signature_2);
         signatures.insert(pubkey, signature_3);
         assert_eq!(

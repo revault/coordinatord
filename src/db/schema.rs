@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS signatures (
 
 CREATE TABLE IF NOT EXISTS spend_txs (
     deposit_txid BYTEA UNIQUE NOT NULL,
-    deposit_vout INTEGER UNIQUE NOT NULL,
+    deposit_vout INTEGER NOT NULL,
     transaction BYTEA UNIQUE NOT NULL
 );
 ";
