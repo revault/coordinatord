@@ -1,6 +1,4 @@
-use crate::db::{
-    fetch_sigs, fetch_spend_tx, store_encrypted_sig, store_plaintext_sig, store_spend_tx,
-};
+use crate::db::{fetch_sigs, fetch_spend_tx, store_sig, store_spend_tx};
 use revault_net::message::server::*;
 
 // Watchtowers only fetch spend transactions from us, so in reality it is
@@ -56,25 +54,7 @@ pub async fn process_stakeholder_message(
             pubkey,
             signature,
         }) => {
-            match signature {
-                RevaultSignature::PlaintextSig(sig) => {
-                    store_plaintext_sig(&pg_config, id, pubkey, sig).await?;
-                }
-                RevaultSignature::EncryptedSig {
-                    encryption_key,
-                    encrypted_signature,
-                } => {
-                    store_encrypted_sig(
-                        &pg_config,
-                        id,
-                        pubkey,
-                        encrypted_signature,
-                        encryption_key,
-                    )
-                    .await?;
-                }
-            };
-
+            store_sig(&pg_config, id, pubkey, signature).await?;
             // FIXME: should we send an explicit response to the sender?
             Ok(None)
         }
@@ -99,11 +79,10 @@ mod tests {
             OutPoint, Txid,
         },
         message::server::*,
-        sodiumoxide::crypto::box_::gen_keypair,
     };
     use revault_tx::transactions::{RevaultTransaction, SpendTransaction};
 
-    use std::{collections::BTreeMap, str::FromStr};
+    use std::str::FromStr;
 
     use tokio::runtime::Builder as RuntimeBuilder;
     use tokio_postgres::tls::NoTls;
@@ -132,16 +111,14 @@ mod tests {
     async fn sig_exchange() {
         let pg_config = postgre_setup().await;
 
-        let signature_1 = RevaultSignature::PlaintextSig(
-            Signature::from_compact(&[
-                0xdc, 0x4d, 0xc2, 0x64, 0xa9, 0xfe, 0xf1, 0x7a, 0x3f, 0x25, 0x34, 0x49, 0xcf, 0x8c,
-                0x39, 0x7a, 0xb6, 0xf1, 0x6f, 0xb3, 0xd6, 0x3d, 0x86, 0x94, 0x0b, 0x55, 0x86, 0x82,
-                0x3d, 0xfd, 0x02, 0xae, 0x3b, 0x46, 0x1b, 0xb4, 0x33, 0x6b, 0x5e, 0xcb, 0xae, 0xfd,
-                0x66, 0x27, 0xaa, 0x92, 0x2e, 0xfc, 0x04, 0x8f, 0xec, 0x0c, 0x88, 0x1c, 0x10, 0xc4,
-                0xc9, 0x42, 0x8f, 0xca, 0x69, 0xc1, 0x32, 0xa2,
-            ])
-            .unwrap(),
-        );
+        let signature_1 = Signature::from_compact(&[
+            0xdc, 0x4d, 0xc2, 0x64, 0xa9, 0xfe, 0xf1, 0x7a, 0x3f, 0x25, 0x34, 0x49, 0xcf, 0x8c,
+            0x39, 0x7a, 0xb6, 0xf1, 0x6f, 0xb3, 0xd6, 0x3d, 0x86, 0x94, 0x0b, 0x55, 0x86, 0x82,
+            0x3d, 0xfd, 0x02, 0xae, 0x3b, 0x46, 0x1b, 0xb4, 0x33, 0x6b, 0x5e, 0xcb, 0xae, 0xfd,
+            0x66, 0x27, 0xaa, 0x92, 0x2e, 0xfc, 0x04, 0x8f, 0xec, 0x0c, 0x88, 0x1c, 0x10, 0xc4,
+            0xc9, 0x42, 0x8f, 0xca, 0x69, 0xc1, 0x32, 0xa2,
+        ])
+        .unwrap();
         // Inputs aren't checked, we could have fed it garbage
         let pubkey = PublicKey::from_slice(&[
             0x02, 0xc6, 0x6e, 0x7d, 0x89, 0x66, 0xb5, 0xc5, 0x55, 0xaf, 0x58, 0x05, 0x98, 0x9d,
@@ -163,107 +140,6 @@ mod tests {
         .await
         .unwrap()
         .is_none());
-
-        let id2 =
-            Txid::from_hex("6a276a96807dd45ceed9cbd6fd48b5edf185623b23339a1643e19e8dcbf2e474")
-                .unwrap();
-        let (encryption_key, _) = gen_keypair();
-        let signature_2 = RevaultSignature::EncryptedSig {
-            encryption_key,
-            encrypted_signature: vec![1u8; 71],
-        };
-        let encrypted_signature_1 = FromStakeholder::Sig(Sig {
-            id: id2,
-            pubkey,
-            signature: signature_2.clone(),
-        });
-        assert!(process_stakeholder_message(
-            &pg_config,
-            serde_json::to_vec(&encrypted_signature_1).unwrap()
-        )
-        .await
-        .unwrap()
-        .is_none());
-
-        // Another signature for the second txid
-        let (encryption_key, _) = gen_keypair();
-        let signature_3 = RevaultSignature::EncryptedSig {
-            encryption_key,
-            encrypted_signature: vec![4u8; 71],
-        };
-        let encrypted_signature_2 = FromStakeholder::Sig(Sig {
-            id: id2,
-            pubkey,
-            signature: signature_3.clone(),
-        });
-        assert!(process_stakeholder_message(
-            &pg_config,
-            serde_json::to_vec(&encrypted_signature_2).unwrap()
-        )
-        .await
-        .unwrap()
-        .is_none());
-
-        // Now fetch the sigs we just stored
-        let mut signatures = BTreeMap::new();
-        signatures.insert(pubkey, signature_1);
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_stakeholder_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id }).unwrap()
-                )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-            .unwrap(),
-            Sigs {
-                signatures: signatures.clone()
-            }
-        );
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_manager_message(&pg_config, serde_json::to_vec(&GetSigs { id }).unwrap())
-                    .await
-                    .unwrap()
-                    .unwrap()
-            )
-            .unwrap(),
-            Sigs { signatures }
-        );
-
-        let mut signatures = BTreeMap::new();
-        signatures.insert(pubkey, signature_2);
-        signatures.insert(pubkey, signature_3);
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_stakeholder_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: id2 }).unwrap()
-                )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-            .unwrap(),
-            Sigs {
-                signatures: signatures.clone()
-            }
-        );
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_manager_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: id2 }).unwrap()
-                )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-            .unwrap(),
-            Sigs { signatures }
-        );
 
         postgre_teardown(&pg_config).await;
     }
