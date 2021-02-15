@@ -12,8 +12,8 @@ use crate::{
 };
 use revault_net::{
     bitcoin::hashes::hex::ToHex,
-    noise::{NoisePrivKey, NoisePubKey},
-    sodiumoxide,
+    noise::{PublicKey as NoisePubKey, SecretKey as NoisePrivKey},
+    sodiumoxide::{self, crypto::scalarmult::curve25519},
     transport::KKTransport,
 };
 
@@ -82,14 +82,8 @@ fn read_or_create_noise_key(secret_file: PathBuf) -> NoisePrivKey {
             "No Noise private key at '{:?}', generating a new one",
             secret_file
         );
+        noise_secret = sodiumoxide::crypto::box_::gen_keypair().1;
 
-        sodiumoxide::init().unwrap_or_else(|_| {
-            eprintln!("Error initializing libsodium.");
-            process::exit(1);
-        });
-        noise_secret
-            .0
-            .copy_from_slice(&sodiumoxide::randombytes::randombytes(32));
         let mut options = fs::OpenOptions::new();
         // We create it in read-only but open it in write only.
         options.write(true).create_new(true).mode(0o400);
@@ -286,6 +280,11 @@ fn main() {
         process::exit(1);
     });
 
+    sodiumoxide::init().unwrap_or_else(|_| {
+        eprintln!("Error initializing libsodium.");
+        process::exit(1);
+    });
+
     let log_file = coordinatord.log_file();
     let log_output = if coordinatord.daemon {
         Some(log_file.to_str().expect("Valid unicode"))
@@ -312,10 +311,11 @@ fn main() {
             process::exit(1);
         });
 
-    let noise_pubkey_hex = noise_secret.pubkey().0.to_hex();
     println!(
         "Started revault_coordinatord with Noise pubkey: {}",
-        noise_pubkey_hex
+        NoisePubKey(curve25519::scalarmult_base(&curve25519::Scalar(noise_secret.0)).0)
+            .0
+            .to_hex()
     );
     log::debug!("Stakeholders keys:");
     for k in coordinatord.stakeholders_keys.iter() {

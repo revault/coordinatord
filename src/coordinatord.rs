@@ -1,5 +1,5 @@
 use crate::config::{datadir_path, Config, ConfigError};
-use revault_net::noise::NoisePubKey;
+use revault_net::noise::PublicKey as NoisePubKey;
 
 use std::{fs, net::SocketAddr, os::unix::fs::DirBuilderExt, path::PathBuf, str::FromStr};
 
@@ -18,15 +18,6 @@ pub struct CoordinatorD {
     pub postgres_config: tokio_postgres::Config,
 }
 
-pub fn noise_keys_from_strlist(
-    keys_str: Vec<String>,
-) -> Result<Vec<NoisePubKey>, revault_net::Error> {
-    keys_str
-        .into_iter()
-        .map(|s| NoisePubKey::from_str(&s))
-        .collect()
-}
-
 fn create_datadir(datadir_path: &PathBuf) -> Result<(), std::io::Error> {
     let mut builder = fs::DirBuilder::new();
     builder.mode(0o700).recursive(true).create(datadir_path)
@@ -35,9 +26,9 @@ fn create_datadir(datadir_path: &PathBuf) -> Result<(), std::io::Error> {
 impl CoordinatorD {
     pub fn from_config(config: Config) -> Result<CoordinatorD, Box<dyn std::error::Error>> {
         // FIXME: upstream should use sodiumoxide's Curve 25519
-        let managers_keys = noise_keys_from_strlist(config.managers)?;
-        let stakeholders_keys = noise_keys_from_strlist(config.stakeholders)?;
-        let watchtowers_keys = noise_keys_from_strlist(config.watchtowers)?;
+        let managers_keys = config.managers.into_iter().map(|x| x.key).collect();
+        let stakeholders_keys = config.stakeholders.into_iter().map(|x| x.key).collect();
+        let watchtowers_keys = config.watchtowers.into_iter().map(|x| x.key).collect();
 
         let mut data_dir = config.data_dir.unwrap_or(datadir_path()?);
         if !data_dir.as_path().exists() {

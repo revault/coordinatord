@@ -4,8 +4,7 @@ use revault_net::{
         secp256k1::{PublicKey, Signature},
         OutPoint, Txid,
     },
-    message::server::{RevaultSignature, Sigs},
-    sodiumoxide::crypto::box_::PublicKey as Curve25519Pubkey,
+    message::server::Sigs,
 };
 use schema::SCHEMA;
 
@@ -60,7 +59,7 @@ pub async fn maybe_create_db(config: &tokio_postgres::Config) -> Result<(), toki
     Ok(())
 }
 
-pub async fn store_plaintext_sig(
+pub async fn store_sig(
     config: &tokio_postgres::Config,
     txid: Txid,
     pubkey: PublicKey,
@@ -96,47 +95,16 @@ pub async fn store_plaintext_sig(
     Ok(())
 }
 
-pub async fn store_encrypted_sig(
-    config: &tokio_postgres::Config,
-    txid: Txid,
-    pubkey: PublicKey,
-    signature: Vec<u8>,
-    encryption_pubkey: Curve25519Pubkey,
-) -> Result<(), tokio_postgres::Error> {
-    let client = establish_connection(config).await?;
-
-    let statement = client
-        .prepare_typed(
-            "INSERT INTO signatures (txid, pubkey, signature, encryption_key) \
-             VALUES ($1, $2, $3, $4)",
-            &[Type::BYTEA, Type::BYTEA, Type::BYTEA, Type::BYTEA],
-        )
-        .await?;
-    client
-        .execute(
-            &statement,
-            &[
-                &txid.as_ref(),
-                &pubkey.serialize().as_ref(),
-                &signature,
-                &encryption_pubkey.0.as_ref(),
-            ],
-        )
-        .await?;
-
-    Ok(())
-}
-
 pub async fn fetch_sigs(
     config: &tokio_postgres::Config,
     txid: Txid,
 ) -> Result<Sigs, tokio_postgres::Error> {
     let client = establish_connection(config).await?;
-    let mut signatures: BTreeMap<PublicKey, RevaultSignature> = BTreeMap::new();
+    let mut signatures: BTreeMap<PublicKey, Signature> = BTreeMap::new();
 
     let statement = client
         .prepare_typed(
-            "SELECT pubkey, signature, encryption_key FROM signatures WHERE txid = $1",
+            "SELECT pubkey, signature FROM signatures WHERE txid = $1",
             &[Type::BYTEA],
         )
         .await?;
@@ -144,26 +112,11 @@ pub async fn fetch_sigs(
         let pubkey: &[u8] = row.get(0);
         let pubkey = PublicKey::from_slice(&pubkey).expect("We input a compressed pubkey");
         let sig: Vec<u8> = row.get(1);
-        let encryption_key: Option<&[u8]> = row.get(2);
 
-        if let Some(encryption_key) = encryption_key {
-            let encryption_key = Curve25519Pubkey::from_slice(&encryption_key)
-                .expect("We only store valid 32-bytes public keys");
-            signatures.insert(
-                pubkey,
-                RevaultSignature::EncryptedSig {
-                    encrypted_signature: sig,
-                    encryption_key,
-                },
-            );
-        } else {
-            signatures.insert(
-                pubkey,
-                RevaultSignature::PlaintextSig(
-                    Signature::from_der(&sig).expect("We input to_der()"),
-                ),
-            );
-        }
+        signatures.insert(
+            pubkey,
+            Signature::from_der(&sig).expect("We input to_der()"),
+        );
     }
 
     Ok(Sigs { signatures })

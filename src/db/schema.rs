@@ -3,12 +3,10 @@ CREATE TABLE IF NOT EXISTS version (
     version INTEGER UNIQUE NOT NULL
 );
 
--- If the encryption_key is not NULL, then the signature is encrypted.
 CREATE TABLE IF NOT EXISTS signatures (
     txid BYTEA NOT NULL,
     pubkey BYTEA NOT NULL,
-    signature BYTEA UNIQUE NOT NULL,
-    encryption_key BYTEA
+    signature BYTEA UNIQUE NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS spend_txs (

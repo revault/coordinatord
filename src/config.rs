@@ -1,18 +1,67 @@
-use revault_net::noise::KEY_SIZE as NOISE_KEY_SIZE;
+use revault_net::{noise::PublicKey as NoisePubKey, sodiumoxide};
 
 use std::{net::SocketAddr, path::PathBuf, vec::Vec};
 
-use serde::Deserialize;
+use serde::{de, Deserialize};
+
+#[derive(Debug, Clone)]
+pub struct NoisePubkeyHex {
+    pub key: NoisePubKey,
+}
+
+impl<'de> de::Visitor<'de> for NoisePubkeyHex {
+    type Value = NoisePubkeyHex;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "a hex encoded string")
+    }
+
+    fn visit_str<E>(self, data: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        let data = sodiumoxide::hex::decode(data).map_err(|e| {
+            de::Error::custom(format!("Invalid hex in Noise public key: '{:?}'", e))
+        })?;
+        let key = NoisePubKey::from_slice(&data)
+            .ok_or_else(|| de::Error::custom("Invalid Noise public key"))?;
+        Ok(NoisePubkeyHex { key })
+    }
+
+    fn visit_borrowed_str<E>(self, data: &'de str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        let data = sodiumoxide::hex::decode(data).map_err(|e| {
+            de::Error::custom(format!("Invalid hex in Noise public key: '{:?}'", e))
+        })?;
+        let key = NoisePubKey::from_slice(&data)
+            .ok_or_else(|| de::Error::custom("Invalid Noise public key"))?;
+        Ok(NoisePubkeyHex { key })
+    }
+}
+
+impl<'de> Deserialize<'de> for NoisePubkeyHex {
+    fn deserialize<D>(deserializer: D) -> Result<NoisePubkeyHex, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let pk = NoisePubkeyHex {
+            key: NoisePubKey([0u8; 32]),
+        };
+        deserializer.deserialize_str(pk)
+    }
+}
 
 /// Static informations we require to operate
 #[derive(Debug, Deserialize)]
 pub struct Config {
     /// The managers Noise static public keys
-    pub managers: Vec<String>,
+    pub managers: Vec<NoisePubkeyHex>,
     /// The stakeholders Noise static public keys
-    pub stakeholders: Vec<String>,
+    pub stakeholders: Vec<NoisePubkeyHex>,
     /// The watchtowers Noise static public keys
-    pub watchtowers: Vec<String>,
+    pub watchtowers: Vec<NoisePubkeyHex>,
     /// PostgreSQL database connection URI, as specified in
     /// https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING
     pub postgres_uri: String,
@@ -54,31 +103,6 @@ fn config_file_path() -> Result<PathBuf, ConfigError> {
     })
 }
 
-fn sanity_check_pubkey_set(pubkeys_str: &[String], entity: &str) -> Result<(), ConfigError> {
-    const HEX_CHARS: &str = "0123456789abcdef";
-
-    if pubkeys_str.is_empty() {
-        return Err(ConfigError(format!("Need at least one {}.", entity)));
-    }
-
-    let invalid_pubkey = pubkeys_str.iter().any(|pk| {
-        pk.len() != NOISE_KEY_SIZE * 2
-            || pk.to_lowercase().find(|c| !HEX_CHARS.contains(c)).is_some()
-    });
-    if invalid_pubkey {
-        eprintln!(
-            "{}",
-            pubkeys_str.iter().any(|pk| pk.len() != NOISE_KEY_SIZE)
-        );
-        return Err(ConfigError(format!(
-            "At least one {} public key is invalid.",
-            entity
-        )));
-    }
-
-    Ok(())
-}
-
 impl Config {
     /// Get our static configuration out of a mandatory configuration file.
     ///
@@ -94,10 +118,6 @@ impl Config {
                 toml::from_slice::<Config>(&file_content)
                     .map_err(|e| ConfigError(format!("Parsing configuration file: {}", e)))
             })?;
-
-        sanity_check_pubkey_set(&config.managers, "managers")?;
-        sanity_check_pubkey_set(&config.stakeholders, "stakeholders")?;
-        sanity_check_pubkey_set(&config.watchtowers, "watchtowers")?;
 
         let stk_len = config.stakeholders.len();
         let wt_len = config.watchtowers.len();
