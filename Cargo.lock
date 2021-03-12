@@ -762,7 +762,7 @@ dependencies = [
 [[package]]
 name = "revault_net"
 version = "0.0.1"
-source = "git+https://github.com/re-vault/revault_net#ab2726f70198aa69dfc20177667f312d0c49547a"
+source = "git+https://github.com/revault/revault_net#ae726a3008d90d05d26ba451e38b8ea4cf4d3e6d"
 dependencies = [
  "revault_tx",
  "serde",
@@ -772,8 +772,9 @@ dependencies = [
 
 [[package]]
 name = "revault_tx"
-version = "0.0.1"
-source = "git+https://github.com/re-vault/revault_tx#283f2d133dfdeb967ef5098bff11b3a6d5d11ae5"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa5ded7990dcc8b935cacde788394d71de4a06eb1b4fec4828b715490b0797b7"
 dependencies = [
  "base64",
  "bitcoinconsensus",
