@@ -2,7 +2,7 @@ mod schema;
 use revault_net::{
     bitcoin::{
         secp256k1::{PublicKey, Signature},
-        OutPoint, Txid,
+        OutPoint, Txid, Transaction as BitcoinTransaction, consensus::encode,
     },
     message::server::Sigs,
 };
@@ -125,9 +125,10 @@ pub async fn fetch_sigs(
 pub async fn store_spend_tx(
     config: &tokio_postgres::Config,
     outpoint: OutPoint,
-    transaction: Vec<u8>,
+    transaction: BitcoinTransaction,
 ) -> Result<(), tokio_postgres::Error> {
     let client = establish_connection(config).await?;
+    let bitcoin_tx = encode::serialize(&transaction);
 
     let statement = client
         .prepare_typed(
@@ -141,7 +142,7 @@ pub async fn store_spend_tx(
             &[
                 &outpoint.txid.as_ref(),
                 &(outpoint.vout as i32),
-                &transaction,
+                &bitcoin_tx,
             ],
         )
         .await?;
@@ -152,7 +153,7 @@ pub async fn store_spend_tx(
 pub async fn fetch_spend_tx(
     config: &tokio_postgres::Config,
     outpoint: OutPoint,
-) -> Result<Option<Vec<u8>>, tokio_postgres::Error> {
+) -> Result<Option<BitcoinTransaction>, tokio_postgres::Error> {
     let client = establish_connection(config).await?;
 
     let statement = client
@@ -170,5 +171,5 @@ pub async fn fetch_spend_tx(
         .get(0)
         .map(|row| row.get::<_, Vec<u8>>(0));
 
-    Ok(spend_tx)
+    Ok(spend_tx.map(|tx| encode::deserialize(&tx).expect("Added to DB with serialize()")))
 }
