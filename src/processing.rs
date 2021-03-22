@@ -19,7 +19,7 @@ pub async fn process_watchtower_message(
 }
 
 // Managers can poll pre-signed transaction signatures and set a spend transaction
-// for a given vault so watchtowers can poll it.
+// for a given set of vaults so watchtowers can poll it.
 pub async fn process_manager_message(
     pg_config: &tokio_postgres::Config,
     msg: Vec<u8>,
@@ -30,7 +30,7 @@ pub async fn process_manager_message(
         )?)),
         FromManager::SetSpend(msg) => {
             // FIXME: return an ACK on success and an error if already present
-            store_spend_tx(pg_config, msg.deposit_outpoint, msg.spend_tx()).await?;
+            store_spend_tx(pg_config, &msg.deposit_outpoints.clone(), msg.spend_tx()).await?;
             Ok(None)
         }
     }
@@ -88,7 +88,22 @@ mod tests {
         let conf =
             tokio_postgres::Config::from_str("postgresql://test:test@localhost/coordinatord_test")
                 .unwrap();
+
+        // Cleanup any leftover
+        let (client, connection) = conf.connect(NoTls).await.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("Database connection error: {}", e);
+            }
+        });
+        client
+            .batch_execute("DROP TABLE IF EXISTS signatures; DROP TABLE IF EXISTS spend_outpoints; DROP TABLE IF EXISTS spend_txs; DROP TABLE IF EXISTS version;")
+            .await
+            .expect("dropping tables");
+
+        // So this becomes *actually* create DB
         maybe_create_db(&conf).await.expect("Creating tables.");
+
         conf
     }
 
@@ -100,7 +115,7 @@ mod tests {
             }
         });
         client
-            .batch_execute("DROP TABLE signatures; DROP TABLE spend_txs; DROP TABLE version;")
+            .batch_execute("DROP TABLE signatures; DROP TABLE spend_outpoints; DROP TABLE spend_txs; DROP TABLE version;")
             .await
             .expect("dropping tables");
     }
@@ -125,18 +140,17 @@ mod tests {
         .unwrap();
         let id = Txid::from_hex("264595a4ace1865dfa442bb923320b8f00413711655165ac13a470db2c5384c0")
             .unwrap();
-        let plaintext_sig = FromStakeholder::Sig(Sig {
+        let sig = FromStakeholder::Sig(Sig {
             id,
             pubkey,
             signature: signature_1.clone(),
         });
-        assert!(process_stakeholder_message(
-            &pg_config,
-            serde_json::to_vec(&plaintext_sig).unwrap()
-        )
-        .await
-        .unwrap()
-        .is_none());
+        assert!(
+            process_stakeholder_message(&pg_config, serde_json::to_vec(&sig).unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         postgre_teardown(&pg_config).await;
     }
@@ -146,11 +160,11 @@ mod tests {
 
         let spend_psbt_str = "\"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\"";
         let spend_tx: SpendTransaction = serde_json::from_str(&spend_psbt_str).unwrap();
-        let deposit_outpoint = OutPoint::from_str(
+        let deposit_outpoints = vec![OutPoint::from_str(
             "4e37824b0bd0843bb94c290956374ffa1752d4c6bc9089fcbd20e1e63518b25e:0",
         )
-        .unwrap();
-        let setspend_msg = SetSpendTx::from_spend_tx(deposit_outpoint, spend_tx.clone());
+        .unwrap()];
+        let setspend_msg = SetSpendTx::from_spend_tx(deposit_outpoints.clone(), spend_tx.clone());
         assert!(
             process_manager_message(&pg_config, serde_json::to_vec(&setspend_msg).unwrap())
                 .await
@@ -158,6 +172,7 @@ mod tests {
                 .is_none()
         );
 
+        let deposit_outpoint = deposit_outpoints[0];
         let getspend_msg = GetSpendTx { deposit_outpoint };
         let received =
             process_watchtower_message(&pg_config, serde_json::to_vec(&getspend_msg).unwrap())
@@ -166,6 +181,46 @@ mod tests {
                 .unwrap();
         let received_msg: SpendTx = serde_json::from_slice(&received).unwrap();
         assert_eq!(received_msg.transaction, spend_tx.into_psbt().extract_tx());
+
+        // If a new one is set with a conflicting outpoint, it'll just get overriden
+        let second_spend_tx = SpendTransaction::from_psbt_str("cHNidP8BAGcCAAAAATJj+J05C8NjU6aFkbjH+AlpaAqUSHqsYmvdXXsC6k0XAAAAAADOYAAAAoAyAAAAAAAAIgAgS4/3QaTXSQuvlpDk4z6xdM4cKh4nMpTnhF0HmaQWsu+gjAIAAAAAAAAAAAAAAAEBK0ANAwAAAAAAIgAg3GSr/0q6qUaIuNJEdndSJ2sKFlDccx5CFx4SZ2spL3wBCP2GAQUASDBFAiEApjf0AqotFH4ffzLCB3JKsbda8Ni3v+oad/gHQCUQy5UCIF9IIaPpmwl3uQT6A5CCBeqUW+fwWL0DLEb3Yke/+G8wAUYwQwIfAXs8XkbDD0WccmcLL7lHdezsQjo40ILZHeiI+zn6nwIgdIjHwGU3bMhFSzk23A21zaQQQfcoRpaLqAwEot7jshYBSDBFAiEA6RwcVU0HdHIXy+/Wh7vXGsSbbUsJ3lXqC3AjApSFcAQCIAqwY2ZnRwXcZA53HWYhKpUUwlPVlhHnMZHREccAx4+UAaohA8ujblABMfWi8DaUwzeN+ttu2AppH8zdsD1K/WY8bMnUrFGHZHapFEEQ586S5hPnp11w9epOlCzJEz84iKxrdqkUUwKW1Yzw4enIBR/m4J62xDYUTI6IrGyTUodnUiEDcMBgveHhyiayIeeNy0b54/FpAEo54BLxJK8GHTVomi0hA2LsGliO85N/vTQGAUbHRf6D0D72NbUQPhznA+1bfyNKUq8CzmCyaAABASUhA8ujblABMfWi8DaUwzeN+ttu2AppH8zdsD1K/WY8bMnUrFGHAAA=").unwrap();
+        let conflicting_deposit_outpoints = vec![
+            deposit_outpoint,
+            OutPoint::from_str(
+                "dbf7040be3ce465638373f48fb681bf3ae334691c328294f908baadfb927e942:1",
+            )
+            .unwrap(),
+        ];
+        let setspend_msg = SetSpendTx::from_spend_tx(
+            conflicting_deposit_outpoints.clone(),
+            second_spend_tx.clone(),
+        );
+        assert!(
+            process_manager_message(&pg_config, serde_json::to_vec(&setspend_msg).unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let getspend_msg = GetSpendTx { deposit_outpoint };
+        let received =
+            process_watchtower_message(&pg_config, serde_json::to_vec(&getspend_msg).unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+        let received_msg: SpendTx = serde_json::from_slice(&received).unwrap();
+        assert_eq!(
+            received_msg.transaction,
+            second_spend_tx.into_psbt().extract_tx()
+        );
+
+        // And we can even set the same Spend again, it will just do nothing
+        // FIXME: it should err explicitly
+        assert!(
+            process_manager_message(&pg_config, serde_json::to_vec(&setspend_msg).unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         postgre_teardown(&pg_config).await;
     }

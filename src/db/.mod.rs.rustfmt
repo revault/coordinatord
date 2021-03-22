@@ -1,9 +1,8 @@
 mod schema;
 use revault_net::{
     bitcoin::{
-        consensus::encode,
         secp256k1::{PublicKey, Signature},
-        OutPoint, Transaction as BitcoinTransaction, Txid,
+        OutPoint, Txid, Transaction as BitcoinTransaction, consensus::encode,
     },
     message::server::Sigs,
 };
@@ -144,7 +143,13 @@ pub async fn store_spend_tx(
         )
         .await?;
     db_tx
-        .execute(&statement, &[&bitcoin_txid, &bitcoin_tx])
+        .execute(
+            &statement,
+            &[
+                &bitcoin_txid,
+                &bitcoin_tx,
+            ],
+        )
         .await?;
 
     // as well as all vault outpoints it refers to
@@ -157,17 +162,15 @@ pub async fn store_spend_tx(
              spend_txid = EXCLUDED.spend_txid",
         &[Type::BYTEA, Type::INT4, Type::BYTEA]
         ).await?;
-        db_tx
-            .execute(
-                &statement,
-                &[
-                    &outpoint.txid.as_ref(),
-                    &(outpoint.vout as i32),
-                    &bitcoin_txid,
-                ],
-            )
-            .await?;
+        db_tx.execute(&statement,
+                      &[
+                      &outpoint.txid.as_ref(),
+                &(outpoint.vout as i32),
+                &bitcoin_txid,
+
+        ]).await?;
     }
+
 
     db_tx.commit().await
 }
