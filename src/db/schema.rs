@@ -10,8 +10,14 @@ CREATE TABLE IF NOT EXISTS signatures (
 );
 
 CREATE TABLE IF NOT EXISTS spend_txs (
-    deposit_txid BYTEA UNIQUE NOT NULL,
-    deposit_vout INTEGER NOT NULL,
+    txid BYTEA UNIQUE NOT NULL,
     transaction BYTEA UNIQUE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS spend_outpoints (
+    deposit_txid BYTEA NOT NULL,
+    deposit_vout INTEGER NOT NULL,
+    spend_txid BYTEA REFERENCES spend_txs (txid) ON DELETE CASCADE,
+    UNIQUE (deposit_txid, deposit_vout)
 );
 ";
