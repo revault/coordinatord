@@ -179,7 +179,7 @@ async fn connection_handler(
                 }
             }
             Err(e) => {
-                log::error!(
+                log::trace!(
                     "Reading error from '{:x?}': '{}'",
                     stream.remote_static(),
                     e
