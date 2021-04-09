@@ -28,4 +28,4 @@ chrono = "0.4"
 tokio-postgres = "0.7"
 
 [dev-dependencies]
-revault_tx = { version = "0.1", features = ["use-serde"] }
+revault_tx = { version = "0.2", features = ["use-serde"] }
