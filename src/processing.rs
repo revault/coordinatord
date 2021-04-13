@@ -286,6 +286,83 @@ mod tests {
             }
         );
 
+        // We can add more sigs for the same txid, and we'll get all of them
+        let pubkey_c = PublicKey::from_str("028c887a4a78211ff320802134046cb1db92215614ac0a078c261ed860f3067f0f").unwrap();
+        let signature_c = Signature::from_str("304402201fbe986a41b69ea65bbb94a042cb6a5edacb898f290c76d76deb5d74241d0309022065d5ad54a36962b75857ce22ddf2189e71e5a0fe6df6e6d5d0c8acdb59e16374").unwrap();
+        let sig = FromStakeholder::Sig(Sig {
+            id: txid_b,
+            pubkey: pubkey_c,
+            signature: signature_c,
+        });
+        assert!(
+            process_stakeholder_message(&pg_config, serde_json::to_vec(&sig).unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let pubkey_d = PublicKey::from_str("02a6d7ef3ffce87bec86fbd80ca510a72abe2c5ac4842fa6308eec8ba457dc66ae").unwrap();
+        let signature_d = Signature::from_str("30440220197a312ee648b762ed795c686217f79b1b825d80bfb87f7c5e387cd713e3a026022077fb9114caafcd6a0d2362cb4eaddb19b5ea8c0fb37b257338d4dfbce239ee9e").unwrap();
+        let sig = FromStakeholder::Sig(Sig {
+            id: txid_b,
+            pubkey: pubkey_d,
+            signature: signature_d,
+        });
+        assert!(
+            process_stakeholder_message(&pg_config, serde_json::to_vec(&sig).unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        signatures_b.insert(pubkey_c, signature_c);
+        signatures_b.insert(pubkey_d, signature_d);
+        assert_eq!(
+            serde_json::from_slice::<Sigs>(
+                &process_stakeholder_message(
+                    &pg_config,
+                    serde_json::to_vec(&GetSigs { id: txid_b }).unwrap()
+               )
+                .await
+                .unwrap()
+                .unwrap()
+            )
+           .unwrap(),
+            Sigs {
+                signatures: signatures_b.clone()
+            }
+        );
+        assert_eq!(
+            serde_json::from_slice::<Sigs>(
+                &process_manager_message(
+                    &pg_config,
+                    serde_json::to_vec(&GetSigs { id: txid_b }).unwrap()
+               )
+                .await
+                .unwrap()
+                .unwrap()
+            )
+           .unwrap(),
+            Sigs {
+                signatures: signatures_b.clone()
+            }
+        );
+        assert_eq!(
+            serde_json::from_slice::<Sigs>(
+                &process_stakeholdermanager_message(
+                    &pg_config,
+                    serde_json::to_vec(&GetSigs { id: txid_b }).unwrap()
+               )
+                .await
+                .unwrap()
+                .unwrap()
+            )
+           .unwrap(),
+            Sigs {
+                signatures: signatures_b.clone()
+            }
+        );
+
         postgre_teardown(&pg_config).await;
     }
 
