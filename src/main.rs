@@ -7,7 +7,8 @@ use crate::{
     coordinatord::CoordinatorD,
     db::maybe_create_db,
     processing::{
-        process_manager_message, process_stakeholder_message, process_watchtower_message,
+        process_manager_message, process_stakeholder_message, process_stakeholdermanager_message,
+        process_watchtower_message,
     },
 };
 use revault_net::{
@@ -118,6 +119,7 @@ fn read_or_create_noise_key(secret_file: PathBuf) -> NoisePrivKey {
 enum MessageSender {
     Manager,
     StakeHolder,
+    ManagerStakeholder,
     WatchTower,
 }
 
@@ -150,13 +152,17 @@ async fn connection_handler(
                         process_stakeholder_message(&*pg_config, msg).await
                     }
                     MessageSender::WatchTower => process_watchtower_message(&*pg_config, msg).await,
+                    MessageSender::ManagerStakeholder => {
+                        process_stakeholdermanager_message(&*pg_config, msg).await
+                    }
                 };
 
                 // We close the connection on processing or response-writing
                 // error.
                 match response {
                     Ok(Some(response)) => {
-                        log::trace!("Responding with {:x?}", response);
+                        log::trace!("Responding with '{}'", String::from_utf8_lossy(&response));
+
                         if let Err(e) = stream.write(&response) {
                             log::error!(
                                 "Writing response '{:x?}' to '{:x?}': '{}'",
@@ -179,7 +185,7 @@ async fn connection_handler(
                 }
             }
             Err(e) => {
-                log::error!(
+                log::trace!(
                     "Reading error from '{:x?}': '{}'",
                     stream.remote_static(),
                     e
@@ -226,20 +232,27 @@ async fn tokio_main(
             Ok(stream) => {
                 // Now figure out who's talking to us
                 let their_pubkey = stream.remote_static();
-                let msg_sender = if managers_keys.contains(&their_pubkey) {
-                    MessageSender::Manager
-                } else if stakeholders_keys.contains(&their_pubkey) {
-                    MessageSender::StakeHolder
-                } else if watchtowers_keys.contains(&their_pubkey) {
-                    MessageSender::WatchTower
-                } else {
-                    unreachable!("An unknown key was able to perform the handshake?")
+                let msg_sender = match (
+                    managers_keys.contains(&their_pubkey),
+                    stakeholders_keys.contains(&their_pubkey),
+                    watchtowers_keys.contains(&their_pubkey),
+                ) {
+                    (_, _, true) => MessageSender::WatchTower,
+                    (m, s, false) => match (m, s) {
+                        (true, true) => MessageSender::ManagerStakeholder,
+                        (true, false) => MessageSender::Manager,
+                        (false, true) => MessageSender::StakeHolder,
+                        (false, false) => {
+                            unreachable!("An unknown key was able to perform the handshake?")
+                        }
+                    },
                 };
+
                 let pg_config = postgres_config.clone();
                 log::trace!(
                     "Got a new connection from a {:?} with key {:x?}",
                     msg_sender,
-                    their_pubkey
+                    their_pubkey.0.to_hex()
                 );
 
                 tokio::spawn(
