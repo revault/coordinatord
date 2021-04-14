@@ -1,0 +1,10 @@
+daemon = false
+data_dir = "/revault_coordinator/"
+log_level = "trace"
+
+postgres_uri = "postgresql://revault:revault@coordinator_db:5432/coordinator_db"
+
+# Edit below
+managers = []
+stakeholders = []
+watchtowers = []
