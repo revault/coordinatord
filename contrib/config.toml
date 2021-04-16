@@ -1,0 +1,10 @@
+daemon = false
+data_dir = "./revault_coordinatord"
+log_level = "debug"
+
+postgres_uri = "postgresql://revault:revault@localhost:5432/coordinator_db"
+
+# Add your own keys there
+managers = []
+stakeholders = []
+watchtowers = []

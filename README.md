@@ -16,6 +16,23 @@ initially configured on the Coordinator.
 **The coordinator is never trusted with funds, it is just a convenient mean to replace
 direct connections between participants.**
 
+## Usage
+
+The coordinator will need access to a PostgreSQL database, set in the configuration file as:
+```
+postgres_uri = "postgresql://user:password@localhost:5432/database_name"
+```
+
+An easy way to try it out without having to configure Postgres on your system is by using Docker:
+```
+docker run --rm -d -p 5432:5432 --name postgres-coordinatord -e POSTGRES_PASSWORD=revault -e POSTGRES_USER=revault -e POSTGRES_DB=coordinator_db postgres:alpine
+cargo run -- --conf contrib/config.toml
+```
+
+For a more complete guide for setting up a demo Revault deployment, check out the tutorial in 
+[`revaultd`'s repository](https://github.com/revault/revaultd/)!
+
+
 ## Contributing
 
 Any contribution of any form (patches, bug reports, documentation, thoughts) is very
