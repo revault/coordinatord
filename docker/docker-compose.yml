@@ -25,6 +25,7 @@ services:
     container_name: coordinatord
     depends_on:
       - coordinator_db
+    restart: on-failure
     build:
       context: ../
       dockerfile: Dockerfile
