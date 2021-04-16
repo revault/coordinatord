@@ -119,14 +119,16 @@ impl Config {
                     .map_err(|e| ConfigError(format!("Parsing configuration file: {}", e)))
             })?;
 
-        let stk_len = config.stakeholders.len();
-        let wt_len = config.watchtowers.len();
-        if stk_len > wt_len {
-            return Err(ConfigError(format!(
-                "Not enough watchtowers ({} stakeholders, but only {} watchtowers)",
-                stk_len, wt_len
-            )));
-        }
+        // FIXME: this check is removed as we're not using watchtowers at the moment,
+        // and having the user to insert some dummy keys is awkward.
+        // let stk_len = config.stakeholders.len();
+        // let wt_len = config.watchtowers.len();
+        // if stk_len > wt_len {
+        //     return Err(ConfigError(format!(
+        //         "Not enough watchtowers ({} stakeholders, but only {} watchtowers)",
+        //         stk_len, wt_len
+        //     )));
+        // }
 
         Ok(config)
     }
