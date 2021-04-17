@@ -49,6 +49,17 @@ be reviewed first on the conceptual level before focusing on code style or gramm
 fixes.
 
 
+# Running the tests
+
+We test message processing against Postgre. Therefore the tests need a running instance
+of Postgre to connect to, `postgresql://revault:revault@localhost/coordinator_db`. The easiest
+way to set one up is by using docker:
+```
+docker run --rm -d -p 5432:5432 --name postgres-coordinatord -e POSTGRES_PASSWORD=revault -e POSTGRES_USER=revault -e POSTGRES_DB=coordinator_db postgres:alpine
+cargo test
+```
+
+
 # Style
 
 To avoid endless bikeshedding, just use [`rustfmt`](https://github.com/rust-lang/rustfmt).
