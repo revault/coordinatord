@@ -5,7 +5,7 @@ use revault_net::{
         secp256k1::{PublicKey, Signature},
         OutPoint, Transaction as BitcoinTransaction, Txid,
     },
-    message::server::Sigs,
+    message::coordinator::Sigs,
 };
 use schema::SCHEMA;
 
@@ -174,7 +174,7 @@ pub async fn store_spend_tx(
 
 pub async fn fetch_spend_tx(
     config: &tokio_postgres::Config,
-    outpoint: OutPoint,
+    outpoint: &OutPoint,
 ) -> Result<Option<BitcoinTransaction>, tokio_postgres::Error> {
     let client = establish_connection(config).await?;
 
