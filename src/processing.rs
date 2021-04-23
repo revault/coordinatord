@@ -1,95 +1,172 @@
 use crate::db::{fetch_sigs, fetch_spend_tx, store_sig, store_spend_tx};
-use revault_net::message::server::*;
+use revault_net::{
+    bitcoin::{
+        secp256k1::{PublicKey as SecpPubKey, Signature},
+        OutPoint, Transaction as BitcoinTransaction, Txid,
+    },
+    message::{coordinator::*, RequestParams, ResponseResult},
+    transport::KKTransport,
+};
+use std::collections::BTreeMap;
 
-// Watchtowers only fetch spend transactions from us, so in reality it is
-// process_getspendtx_message() here.
-pub async fn process_watchtower_message(
-    pg_config: &tokio_postgres::Config,
-    msg: Vec<u8>,
-) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-    let GetSpendTx { deposit_outpoint } = serde_json::from_slice::<GetSpendTx>(&msg)?;
-    let response = if let Some(transaction) = fetch_spend_tx(pg_config, deposit_outpoint).await? {
-        serde_json::to_vec(&SpendTx { transaction })?
-    } else {
-        // FIXME: make it an Option!!
-        vec![]
-    };
-
-    Ok(Some(response))
-}
-
-async fn answer_getsigs(
-    pg_config: &tokio_postgres::Config,
-    msg: GetSigs,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    serde_json::to_vec(&fetch_sigs(pg_config, msg.id).await?).map_err(|e| Box::from(e))
-}
-
-// Managers can poll pre-signed transaction signatures and set a spend transaction
-// for a given set of vaults so watchtowers can poll it.
-pub async fn process_manager_message(
-    pg_config: &tokio_postgres::Config,
-    msg: Vec<u8>,
-) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-    log::trace!("Processing manager message");
-
-    match serde_json::from_slice::<FromManager>(&msg)? {
-        FromManager::GetSigs(msg) => answer_getsigs(pg_config, msg).await.map(|x| Some(x)),
-        FromManager::SetSpend(msg) => {
-            // FIXME: return an ACK on success and an error if already present
-            store_spend_tx(pg_config, &msg.deposit_outpoints.clone(), msg.spend_tx()).await?;
-            Ok(None)
+// Fetch the signatures from database for this txid
+async fn get_sigs(pg_config: &tokio_postgres::Config, params: &GetSigs) -> ResponseResult {
+    match fetch_sigs(pg_config, params.id).await {
+        Ok(sigs) => ResponseResult::Sigs(sigs),
+        Err(e) => {
+            log::error!(
+                "Error fetching signatures for '{:?}': '{}'. Returning an empty set.",
+                params,
+                e
+            );
+            ResponseResult::Sigs(Sigs {
+                signatures: BTreeMap::new(),
+            })
         }
     }
 }
 
-// Stakeholders only send us signatures, so we juste store and serve signatures
-// idntified by txids.
-pub async fn process_stakeholder_message(
+// Store this signature in the database
+async fn set_sig(
     pg_config: &tokio_postgres::Config,
-    msg: Vec<u8>,
-) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-    log::trace!("Processing stakeholder message");
-
-    match serde_json::from_slice::<FromStakeholder>(&msg)? {
-        // We got a new signature for a pre-signed transaction. Just store it. If we can't
-        // trust our own stakeholders, who can we trust?
-        FromStakeholder::Sig(Sig {
-            id,
-            pubkey,
-            signature,
-        }) => {
-            store_sig(&pg_config, id, pubkey, signature).await?;
-            // FIXME: should we send an explicit response to the sender?
-            Ok(None)
+    txid: Txid,
+    pubkey: SecpPubKey,
+    signature: Signature,
+) -> ResponseResult {
+    match store_sig(&pg_config, txid, pubkey, signature).await {
+        Ok(()) => ResponseResult::Sig(SigResult { ack: true }),
+        Err(e) => {
+            log::error!("Error while storing Sig: '{}'", e);
+            ResponseResult::Sig(SigResult { ack: false })
         }
-        // If we got some sigs, send them
-        FromStakeholder::GetSigs(msg) => answer_getsigs(pg_config, msg).await.map(|x| Some(x)),
     }
 }
 
-// Stakeholders-managers can send us both what the above process_*_message() handle, so direct it
-// to the right one
-pub async fn process_stakeholdermanager_message(
+// Fetch the signatures from database for this txid
+async fn set_spend_tx(
     pg_config: &tokio_postgres::Config,
-    msg: Vec<u8>,
-) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-    log::trace!("Processing manager-stakeholder message");
-
-    match serde_json::from_slice::<FromParticipant>(&msg)? {
-        FromParticipant::GetSigs(_) => process_stakeholder_message(pg_config, msg).await,
-        FromParticipant::Sig(_) => process_stakeholder_message(pg_config, msg).await,
-        FromParticipant::SetSpend(_) => process_manager_message(pg_config, msg).await,
+    deposits: &Vec<OutPoint>,
+    spend_tx: BitcoinTransaction,
+) -> ResponseResult {
+    match store_spend_tx(pg_config, deposits, spend_tx).await {
+        Ok(()) => ResponseResult::SetSpend(SetSpendResult { ack: true }),
+        Err(e) => {
+            log::error!("Error while storing Spend tx: '{}'", e);
+            ResponseResult::SetSpend(SetSpendResult { ack: false })
+        }
     }
+}
+
+// Get this Spend tx from database, and on error log and returns None for now (FIXME!).
+async fn get_spend_tx(
+    pg_config: &tokio_postgres::Config,
+    deposit: &OutPoint,
+) -> Option<ResponseResult> {
+    match fetch_spend_tx(pg_config, deposit).await {
+        Ok(Some(transaction)) => Some(ResponseResult::SpendTx(SpendTx { transaction })),
+        Ok(None) => None, // FIXME: the message should be an option, and specified in practical-revault!!
+        Err(e) => {
+            log::error!("Error while fetching Spend tx: '{}'", e);
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MessageSender {
+    Manager,
+    StakeHolder,
+    ManagerStakeholder,
+    WatchTower,
+}
+
+/// Read a message from this stream, and process it depending on the sender.
+pub async fn read_req(
+    pg_config: &tokio_postgres::Config,
+    stream: &mut KKTransport,
+    sender: MessageSender,
+) -> Result<(), revault_net::Error> {
+    log::trace!("Reading a new message from '{:?}'", sender);
+
+    stream
+        .read_req_async(|req_params| async {
+            match req_params {
+                // The get_sigs message can only be sent by a participant's wallet
+                RequestParams::GetSigs(ref msg) => {
+                    if matches!(
+                        sender,
+                        MessageSender::Manager
+                            | MessageSender::StakeHolder
+                            | MessageSender::ManagerStakeholder
+                    ) {
+                        Some(get_sigs(pg_config, msg).await)
+                    } else {
+                        log::error!("Unexpected get_sigs '{:?}' from '{:?}'", req_params, sender);
+                        None
+                    }
+                }
+                // The sig message can only be sent by a stakeholder's wallet
+                RequestParams::CoordSig(Sig {
+                    id,
+                    pubkey,
+                    signature,
+                }) => {
+                    if matches!(
+                        sender,
+                        MessageSender::StakeHolder | MessageSender::ManagerStakeholder
+                    ) {
+                        Some(set_sig(pg_config, id, pubkey, signature).await)
+                    } else {
+                        log::error!("Unexpected sig '{:?}' from '{:?}'", req_params, sender);
+                        None
+                    }
+                }
+                // The set_spend_tx message may only be sent by a manager's wallet
+                RequestParams::SetSpendTx(msg) => {
+                    if matches!(
+                        sender,
+                        MessageSender::Manager | MessageSender::ManagerStakeholder
+                    ) {
+                        Some(
+                            set_spend_tx(pg_config, &msg.deposit_outpoints.clone(), msg.spend_tx())
+                                .await,
+                        )
+                    } else {
+                        log::error!("Unexpected set_spend_tx from '{:?}'", sender);
+                        None
+                    }
+                }
+                // The get_spend_tx message may only be sent by a watchtower
+                // TODO: we may have to accept it from wallets too, as they may want to inspect it too.
+                RequestParams::GetSpendTx(GetSpendTx { deposit_outpoint }) => {
+                    if matches!(sender, MessageSender::WatchTower) {
+                        get_spend_tx(pg_config, &deposit_outpoint).await
+                    } else {
+                        log::error!(
+                            "Unexpected get_spend_tx '{:?}' from '{:?}'",
+                            req_params,
+                            sender
+                        );
+                        None
+                    }
+                }
+                // Any other message is not for us
+                _ => {
+                    log::error!(
+                        "Received unexpected request from stakeholder: '{:?}'",
+                        req_params
+                    );
+                    None
+                }
+            }
+        })
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use crate::db::*;
-    use crate::processing::{
-        process_manager_message, process_stakeholder_message, process_stakeholdermanager_message,
-        process_watchtower_message,
-    };
+    use crate::processing::{get_sigs, get_spend_tx, set_sig, set_spend_tx};
 
     use revault_net::{
         bitcoin::{
@@ -97,19 +174,43 @@ mod tests {
             secp256k1::{PublicKey, Signature},
             OutPoint, Txid,
         },
-        message::server::*,
+        message::{coordinator::*, ResponseResult},
     };
     use revault_tx::transactions::{RevaultTransaction, SpendTransaction};
 
-    use std::{str::FromStr, collections::BTreeMap};
+    use std::{collections::BTreeMap, str::FromStr};
 
     use tokio::runtime::Builder as RuntimeBuilder;
     use tokio_postgres::tls::NoTls;
 
-    async fn postgre_setup() -> tokio_postgres::Config {
+    async fn create_test_db() {
         let conf =
-            tokio_postgres::Config::from_str("postgresql://test:test@localhost/coordinatord_test")
+            tokio_postgres::Config::from_str("postgresql://revault:revault@localhost/postgres")
                 .unwrap();
+
+        let (client, connection) = conf.connect(NoTls).await.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("Database connection error: {}", e);
+            }
+        });
+
+        client
+            .batch_execute("DROP DATABASE IF EXISTS coordinatord_test;")
+            .await
+            .expect("dropping tables");
+        client
+            .batch_execute("CREATE DATABASE coordinatord_test;")
+            .await
+            .expect("dropping tables");
+    }
+
+    async fn postgre_setup() -> tokio_postgres::Config {
+        create_test_db().await;
+        let conf = tokio_postgres::Config::from_str(
+            "postgresql://revault:revault@localhost/coordinatord_test",
+        )
+        .unwrap();
 
         // Cleanup any leftover
         let (client, connection) = conf.connect(NoTls).await.unwrap();
@@ -142,9 +243,7 @@ mod tests {
             .expect("dropping tables");
     }
 
-    async fn sig_exchange() {
-        let pg_config = postgre_setup().await;
-
+    async fn sig_exchange(pg_config: &tokio_postgres::Config) {
         let signature_a = Signature::from_compact(&[
             0xdc, 0x4d, 0xc2, 0x64, 0xa9, 0xfe, 0xf1, 0x7a, 0x3f, 0x25, 0x34, 0x49, 0xcf, 0x8c,
             0x39, 0x7a, 0xb6, 0xf1, 0x6f, 0xb3, 0xd6, 0x3d, 0x86, 0x94, 0x0b, 0x55, 0x86, 0x82,
@@ -160,241 +259,102 @@ mod tests {
             0xc9, 0x62, 0x67, 0x90, 0x63,
         ])
         .unwrap();
-        let txid_a = Txid::from_hex("264595a4ace1865dfa442bb923320b8f00413711655165ac13a470db2c5384c0")
-            .unwrap();
-        let sig = FromStakeholder::Sig(Sig {
-            id: txid_a,
-            pubkey: pubkey_a,
-            signature: signature_a.clone(),
-        });
-        assert!(
-            process_stakeholder_message(&pg_config, serde_json::to_vec(&sig).unwrap())
-                .await
-                .unwrap()
-                .is_none()
+        let txid_a =
+            Txid::from_hex("264595a4ace1865dfa442bb923320b8f00413711655165ac13a470db2c5384c0")
+                .unwrap();
+        assert_eq!(
+            set_sig(pg_config, txid_a, pubkey_a, signature_a.clone()).await,
+            ResponseResult::Sig(SigResult { ack: true })
         );
 
-        let pubkey_b = PublicKey::from_str("03ffae85b76dd0dd96cbf23348fb398ab93274466759201ecf29d0f68ddd9d1b6c").unwrap();
-        let txid_b = Txid::from_hex("ead1ff4c948a4993097647b84cd0aa80d3205cc8ddcd19b8aca154743c2e5cec").unwrap();
+        let pubkey_b = PublicKey::from_str(
+            "03ffae85b76dd0dd96cbf23348fb398ab93274466759201ecf29d0f68ddd9d1b6c",
+        )
+        .unwrap();
+        let txid_b =
+            Txid::from_hex("ead1ff4c948a4993097647b84cd0aa80d3205cc8ddcd19b8aca154743c2e5cec")
+                .unwrap();
         let signature_b = Signature::from_str("304402204b0ab8a7d95d5b67d5c1b8584a3075adcac787a315f79a9b52b5a736909c975502206def9036d3d980a7cb66f2baa64ebdcd6648d70b324c6c18c349fa240dd07ca8").unwrap();
-        let sig = FromStakeholder::Sig(Sig {
-            id: txid_b,
-            pubkey: pubkey_b,
-            signature: signature_b,
-        });
-        assert!(
-            process_stakeholdermanager_message(&pg_config, serde_json::to_vec(&sig).unwrap())
-                .await
-                .unwrap()
-                .is_none()
+        assert_eq!(
+            set_sig(pg_config, txid_b, pubkey_b, signature_b.clone()).await,
+            ResponseResult::Sig(SigResult { ack: true })
         );
 
         // Now fetch the sigs we just stored
         let mut signatures_a = BTreeMap::new();
         signatures_a.insert(pubkey_a, signature_a);
         assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_stakeholder_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: txid_a }).unwrap()
-               )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-           .unwrap(),
-            Sigs {
+            get_sigs(pg_config, &GetSigs { id: txid_a }).await,
+            ResponseResult::Sigs(Sigs {
                 signatures: signatures_a.clone()
-            }
-        );
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_manager_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: txid_a }).unwrap()
-               )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-           .unwrap(),
-            Sigs {
-                signatures: signatures_a.clone()
-            }
-        );
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_stakeholdermanager_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: txid_a }).unwrap()
-               )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-           .unwrap(),
-            Sigs {
-                signatures: signatures_a.clone()
-            }
+            })
         );
 
         let mut signatures_b = BTreeMap::new();
         signatures_b.insert(pubkey_b, signature_b);
         assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_stakeholder_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: txid_b }).unwrap()
-               )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-           .unwrap(),
-            Sigs {
+            get_sigs(pg_config, &GetSigs { id: txid_b }).await,
+            ResponseResult::Sigs(Sigs {
                 signatures: signatures_b.clone()
-            }
-        );
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_manager_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: txid_b }).unwrap()
-               )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-           .unwrap(),
-            Sigs {
-                signatures: signatures_b.clone()
-            }
-        );
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_stakeholdermanager_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: txid_b }).unwrap()
-               )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-           .unwrap(),
-            Sigs {
-                signatures: signatures_b.clone()
-            }
+            })
         );
 
         // We can add more sigs for the same txid, and we'll get all of them
-        let pubkey_c = PublicKey::from_str("028c887a4a78211ff320802134046cb1db92215614ac0a078c261ed860f3067f0f").unwrap();
+        let pubkey_c = PublicKey::from_str(
+            "028c887a4a78211ff320802134046cb1db92215614ac0a078c261ed860f3067f0f",
+        )
+        .unwrap();
         let signature_c = Signature::from_str("304402201fbe986a41b69ea65bbb94a042cb6a5edacb898f290c76d76deb5d74241d0309022065d5ad54a36962b75857ce22ddf2189e71e5a0fe6df6e6d5d0c8acdb59e16374").unwrap();
-        let sig = FromStakeholder::Sig(Sig {
-            id: txid_b,
-            pubkey: pubkey_c,
-            signature: signature_c,
-        });
-        assert!(
-            process_stakeholder_message(&pg_config, serde_json::to_vec(&sig).unwrap())
-                .await
-                .unwrap()
-                .is_none()
+        assert_eq!(
+            set_sig(pg_config, txid_b, pubkey_c, signature_c.clone()).await,
+            ResponseResult::Sig(SigResult { ack: true })
         );
 
-        let pubkey_d = PublicKey::from_str("02a6d7ef3ffce87bec86fbd80ca510a72abe2c5ac4842fa6308eec8ba457dc66ae").unwrap();
+        let pubkey_d = PublicKey::from_str(
+            "02a6d7ef3ffce87bec86fbd80ca510a72abe2c5ac4842fa6308eec8ba457dc66ae",
+        )
+        .unwrap();
         let signature_d = Signature::from_str("30440220197a312ee648b762ed795c686217f79b1b825d80bfb87f7c5e387cd713e3a026022077fb9114caafcd6a0d2362cb4eaddb19b5ea8c0fb37b257338d4dfbce239ee9e").unwrap();
-        let sig = FromStakeholder::Sig(Sig {
-            id: txid_b,
-            pubkey: pubkey_d,
-            signature: signature_d,
-        });
-        assert!(
-            process_stakeholder_message(&pg_config, serde_json::to_vec(&sig).unwrap())
-                .await
-                .unwrap()
-                .is_none()
+        assert_eq!(
+            set_sig(pg_config, txid_b, pubkey_d, signature_d.clone()).await,
+            ResponseResult::Sig(SigResult { ack: true })
         );
 
         signatures_b.insert(pubkey_c, signature_c);
         signatures_b.insert(pubkey_d, signature_d);
         assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_stakeholder_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: txid_b }).unwrap()
-               )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-           .unwrap(),
-            Sigs {
+            get_sigs(pg_config, &GetSigs { id: txid_b }).await,
+            ResponseResult::Sigs(Sigs {
                 signatures: signatures_b.clone()
-            }
+            })
         );
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_manager_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: txid_b }).unwrap()
-               )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-           .unwrap(),
-            Sigs {
-                signatures: signatures_b.clone()
-            }
-        );
-        assert_eq!(
-            serde_json::from_slice::<Sigs>(
-                &process_stakeholdermanager_message(
-                    &pg_config,
-                    serde_json::to_vec(&GetSigs { id: txid_b }).unwrap()
-               )
-                .await
-                .unwrap()
-                .unwrap()
-            )
-           .unwrap(),
-            Sigs {
-                signatures: signatures_b.clone()
-            }
-        );
-
-        postgre_teardown(&pg_config).await;
     }
 
-    async fn spend_tx_exchange() {
-        let pg_config = postgre_setup().await;
-
+    async fn spend_tx_exchange(pg_config: &tokio_postgres::Config) {
         let spend_psbt_str = "\"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\"";
         let spend_tx: SpendTransaction = serde_json::from_str(&spend_psbt_str).unwrap();
+        let spend_tx = spend_tx.into_psbt().extract_tx();
         let deposit_outpoints = vec![OutPoint::from_str(
             "4e37824b0bd0843bb94c290956374ffa1752d4c6bc9089fcbd20e1e63518b25e:0",
         )
         .unwrap()];
-        let setspend_msg = SetSpendTx::from_spend_tx(deposit_outpoints.clone(), spend_tx.clone());
-        assert!(
-            process_manager_message(&pg_config, serde_json::to_vec(&setspend_msg).unwrap())
-                .await
-                .unwrap()
-                .is_none()
+        assert_eq!(
+            set_spend_tx(pg_config, &deposit_outpoints, spend_tx.clone()).await,
+            ResponseResult::SetSpend(SetSpendResult { ack: true })
         );
 
         let deposit_outpoint = deposit_outpoints[0];
-        let getspend_msg = GetSpendTx { deposit_outpoint };
-        let received =
-            process_watchtower_message(&pg_config, serde_json::to_vec(&getspend_msg).unwrap())
-                .await
-                .unwrap()
-                .unwrap();
-        let received_msg: SpendTx = serde_json::from_slice(&received).unwrap();
-        assert_eq!(received_msg.transaction, spend_tx.into_psbt().extract_tx());
+        let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
+        assert_eq!(
+            received,
+            ResponseResult::SpendTx(SpendTx {
+                transaction: spend_tx
+            })
+        );
 
         // If a new one is set with a conflicting outpoint, it'll just get overriden
         let second_spend_tx = SpendTransaction::from_psbt_str("cHNidP8BAGcCAAAAATJj+J05C8NjU6aFkbjH+AlpaAqUSHqsYmvdXXsC6k0XAAAAAADOYAAAAoAyAAAAAAAAIgAgS4/3QaTXSQuvlpDk4z6xdM4cKh4nMpTnhF0HmaQWsu+gjAIAAAAAAAAAAAAAAAEBK0ANAwAAAAAAIgAg3GSr/0q6qUaIuNJEdndSJ2sKFlDccx5CFx4SZ2spL3wBCP2GAQUASDBFAiEApjf0AqotFH4ffzLCB3JKsbda8Ni3v+oad/gHQCUQy5UCIF9IIaPpmwl3uQT6A5CCBeqUW+fwWL0DLEb3Yke/+G8wAUYwQwIfAXs8XkbDD0WccmcLL7lHdezsQjo40ILZHeiI+zn6nwIgdIjHwGU3bMhFSzk23A21zaQQQfcoRpaLqAwEot7jshYBSDBFAiEA6RwcVU0HdHIXy+/Wh7vXGsSbbUsJ3lXqC3AjApSFcAQCIAqwY2ZnRwXcZA53HWYhKpUUwlPVlhHnMZHREccAx4+UAaohA8ujblABMfWi8DaUwzeN+ttu2AppH8zdsD1K/WY8bMnUrFGHZHapFEEQ586S5hPnp11w9epOlCzJEz84iKxrdqkUUwKW1Yzw4enIBR/m4J62xDYUTI6IrGyTUodnUiEDcMBgveHhyiayIeeNy0b54/FpAEo54BLxJK8GHTVomi0hA2LsGliO85N/vTQGAUbHRf6D0D72NbUQPhznA+1bfyNKUq8CzmCyaAABASUhA8ujblABMfWi8DaUwzeN+ttu2AppH8zdsD1K/WY8bMnUrFGHAAA=").unwrap();
+        let second_spend_tx = second_spend_tx.into_psbt().extract_tx();
         let conflicting_deposit_outpoints = vec![
             deposit_outpoint,
             OutPoint::from_str(
@@ -402,54 +362,41 @@ mod tests {
             )
             .unwrap(),
         ];
-        let setspend_msg = SetSpendTx::from_spend_tx(
-            conflicting_deposit_outpoints.clone(),
-            second_spend_tx.clone(),
-        );
-        assert!(
-            process_manager_message(&pg_config, serde_json::to_vec(&setspend_msg).unwrap())
-                .await
-                .unwrap()
-                .is_none()
-        );
         assert_eq!(
-            process_manager_message(&pg_config, serde_json::to_vec(&setspend_msg).unwrap()).await.unwrap(),
-            process_stakeholdermanager_message(
-                &pg_config,
-                serde_json::to_vec(&setspend_msg).unwrap()
+            set_spend_tx(
+                pg_config,
+                &conflicting_deposit_outpoints,
+                second_spend_tx.clone()
             )
-            .await.unwrap()
+            .await,
+            ResponseResult::SetSpend(SetSpendResult { ack: true })
         );
-        let getspend_msg = GetSpendTx { deposit_outpoint };
-        let received =
-            process_watchtower_message(&pg_config, serde_json::to_vec(&getspend_msg).unwrap())
-                .await
-                .unwrap()
-                .unwrap();
-        let received_msg: SpendTx = serde_json::from_slice(&received).unwrap();
+        let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
         assert_eq!(
-            received_msg.transaction,
-            second_spend_tx.into_psbt().extract_tx()
+            received,
+            ResponseResult::SpendTx(SpendTx {
+                transaction: second_spend_tx.clone()
+            })
         );
 
         // And we can even set the same Spend again, it will just do nothing
         // FIXME: it should err explicitly
-        assert!(
-            process_manager_message(&pg_config, serde_json::to_vec(&setspend_msg).unwrap())
-                .await
-                .unwrap()
-                .is_none()
-        );
         assert_eq!(
-            process_manager_message(&pg_config, serde_json::to_vec(&setspend_msg).unwrap()).await.unwrap(),
-            process_stakeholdermanager_message(
-                &pg_config,
-                serde_json::to_vec(&setspend_msg).unwrap()
+            set_spend_tx(
+                pg_config,
+                &conflicting_deposit_outpoints,
+                second_spend_tx.clone()
             )
-            .await.unwrap()
+            .await,
+            ResponseResult::SetSpend(SetSpendResult { ack: true })
         );
-
-        postgre_teardown(&pg_config).await;
+        let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
+        assert_eq!(
+            received,
+            ResponseResult::SpendTx(SpendTx {
+                transaction: second_spend_tx
+            })
+        );
     }
 
     #[test]
@@ -459,7 +406,17 @@ mod tests {
             .thread_name("coordinatord_test")
             .build()
             .expect("Creating tokio runtime");
-        rt.block_on(sig_exchange());
-        rt.block_on(spend_tx_exchange());
+
+        async fn run_tests() {
+            let pg_config = postgre_setup().await;
+            sig_exchange(&pg_config).await;
+            postgre_teardown(&pg_config).await;
+
+            let pg_config = postgre_setup().await;
+            spend_tx_exchange(&pg_config).await;
+            postgre_teardown(&pg_config).await;
+        }
+
+        rt.block_on(run_tests());
     }
 }

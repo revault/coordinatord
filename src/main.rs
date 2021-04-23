@@ -6,10 +6,7 @@ use crate::{
     config::Config,
     coordinatord::CoordinatorD,
     db::maybe_create_db,
-    processing::{
-        process_manager_message, process_stakeholder_message, process_stakeholdermanager_message,
-        process_watchtower_message,
-    },
+    processing::{read_req, MessageSender},
 };
 use revault_net::{
     bitcoin::hashes::hex::ToHex,
@@ -20,7 +17,7 @@ use revault_net::{
 
 use std::{
     env, fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     net::TcpListener,
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
@@ -115,82 +112,43 @@ fn read_or_create_noise_key(secret_file: PathBuf) -> NoisePrivKey {
     noise_secret
 }
 
-#[derive(Debug)]
-enum MessageSender {
-    Manager,
-    StakeHolder,
-    ManagerStakeholder,
-    WatchTower,
-}
-
 // Process all messages from this connection
 async fn connection_handler(
     mut stream: KKTransport,
     msg_sender: MessageSender,
     pg_config: Arc<tokio_postgres::Config>,
 ) {
+    let pg_config = &*pg_config;
+
     loop {
-        match stream.read() {
-            Ok(msg) => {
-                // read() is nice: on non-fatal error (basically connection
-                // interruption) it'll just signal it by returning an empty
-                // buffer.
-                if msg.is_empty() {
-                    log::trace!("Empty message, connection was ended by peer.");
-                    return;
+        match read_req(pg_config, &mut stream, msg_sender).await {
+            Err(revault_net::Error::Transport(e)) => {
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof
+                ) {
+                    log::trace!("Socket closed for {:?}", msg_sender);
+                } else {
+                    log::error!(
+                        "Error while reading request from {:?}: '{}' ('{:?}')",
+                        msg_sender,
+                        e,
+                        e
+                    );
                 }
-                log::trace!(
-                    "Got message '{}' (raw: '{:x?}') from {:?}",
-                    String::from_utf8_lossy(&msg),
-                    msg,
-                    msg_sender
-                );
-
-                let response = match msg_sender {
-                    MessageSender::Manager => process_manager_message(&*pg_config, msg).await,
-                    MessageSender::StakeHolder => {
-                        process_stakeholder_message(&*pg_config, msg).await
-                    }
-                    MessageSender::WatchTower => process_watchtower_message(&*pg_config, msg).await,
-                    MessageSender::ManagerStakeholder => {
-                        process_stakeholdermanager_message(&*pg_config, msg).await
-                    }
-                };
-
-                // We close the connection on processing or response-writing
-                // error.
-                match response {
-                    Ok(Some(response)) => {
-                        log::trace!("Responding with '{}'", String::from_utf8_lossy(&response));
-
-                        if let Err(e) = stream.write(&response) {
-                            log::error!(
-                                "Writing response '{:x?}' to '{:x?}': '{}'",
-                                response,
-                                stream.remote_static(),
-                                e
-                            );
-                            return;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        log::error!(
-                            "Processing message from '{:x?}': '{}'",
-                            stream.remote_static(),
-                            e
-                        );
-                        return;
-                    }
-                }
+                break;
             }
             Err(e) => {
-                log::trace!(
-                    "Reading error from '{:x?}': '{}'",
-                    stream.remote_static(),
+                log::error!(
+                    "Error while reading request from {:?}: '{}' ('{:?}')",
+                    msg_sender,
+                    e,
                     e
                 );
-                return;
+                break;
+            }
+            Ok(()) => {
+                log::trace!("Finished reading a single message from {:?}", msg_sender);
             }
         }
     }
@@ -250,7 +208,7 @@ async fn tokio_main(
 
                 let pg_config = postgres_config.clone();
                 log::trace!(
-                    "Got a new connection from a {:?} with key {:x?}",
+                    "Got a new connection from a {:?} with key '{}'",
                     msg_sender,
                     their_pubkey.0.to_hex()
                 );

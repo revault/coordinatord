@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS signatures (
 
 CREATE TABLE IF NOT EXISTS spend_txs (
     txid BYTEA UNIQUE NOT NULL,
-    transaction BYTEA UNIQUE NOT NULL
+    transaction BYTEA NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS spend_outpoints (
