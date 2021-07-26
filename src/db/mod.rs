@@ -13,12 +13,15 @@ use std::{collections::BTreeMap, fmt};
 
 use tokio_postgres::{types::Type, Client, NoTls};
 
+pub const DB_VERSION: i32 = 0;
+
 #[derive(Debug)]
 pub enum DbError {
     /// An error originating from the Postgres backend
     Postgres(tokio_postgres::Error),
     /// Trying to insert the same data twice
     Duplicate,
+    WrongVersion(i32),
 }
 
 impl fmt::Display for DbError {
@@ -26,6 +29,11 @@ impl fmt::Display for DbError {
         match self {
             Self::Postgres(e) => write!(f, "{}", e),
             Self::Duplicate => write!(f, "Trying to insert a duplicated entry"),
+            Self::WrongVersion(v) => write!(
+                f,
+                "Unexpected database version, got: {}, expected: {}",
+                v, DB_VERSION
+            ),
         }
     }
 }
@@ -52,10 +60,23 @@ async fn establish_connection(
     Ok(client)
 }
 
-pub async fn maybe_create_db(config: &tokio_postgres::Config) -> Result<(), tokio_postgres::Error> {
+pub async fn maybe_create_db(config: &tokio_postgres::Config) -> Result<(), DbError> {
     let client = establish_connection(config).await?;
 
     client.batch_execute(SCHEMA).await?;
+    let db_version = client.query_opt("SELECT version FROM VERSION", &[]).await?;
+    if let Some(db_ver) = db_version {
+        let db_ver = db_ver.get(0);
+        if db_ver != DB_VERSION {
+            return Err(DbError::WrongVersion(db_ver));
+        }
+    } else {
+        // Alright, we just created the db. Let's insert the version...
+        let statement = client
+            .prepare_typed("INSERT INTO version(version) VALUES ($1)", &[Type::INT4])
+            .await?;
+        client.execute(&statement, &[&(DB_VERSION)]).await?;
+    }
 
     Ok(())
 }
