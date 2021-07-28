@@ -218,3 +218,121 @@ pub async fn fetch_spend_tx(
 
     Ok(spend_tx.map(|tx| encode::deserialize(&tx).expect("Added to DB with serialize()")))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::db::*;
+
+    use std::str::FromStr;
+
+    use tokio::runtime::Builder as RuntimeBuilder;
+    use tokio_postgres::tls::NoTls;
+
+    async fn create_test_db() {
+        let conf =
+            tokio_postgres::Config::from_str("postgresql://revault:revault@localhost/postgres")
+                .unwrap();
+
+        let (client, connection) = conf.connect(NoTls).await.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("Database connection error: {}", e);
+            }
+        });
+
+        client
+            .batch_execute("DROP DATABASE IF EXISTS coordinatord_test_db;")
+            .await
+            .expect("dropping tables");
+        client
+            .batch_execute("CREATE DATABASE coordinatord_test_db;")
+            .await
+            .expect("creating tables");
+    }
+
+    async fn postgre_setup() -> tokio_postgres::Config {
+        create_test_db().await;
+        let conf = tokio_postgres::Config::from_str(
+            "postgresql://revault:revault@localhost/coordinatord_test_db",
+        )
+        .unwrap();
+
+        // Cleanup any leftover
+        let (client, connection) = conf.connect(NoTls).await.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("Database connection error: {}", e);
+            }
+        });
+        client
+            .batch_execute("DROP TABLE IF EXISTS signatures; DROP TABLE IF EXISTS spend_outpoints; DROP TABLE IF EXISTS spend_txs; DROP TABLE IF EXISTS version;")
+            .await
+            .expect("dropping tables");
+
+        conf
+    }
+
+    async fn postgre_teardown(conf: &tokio_postgres::Config) {
+        let (client, connection) = conf.connect(NoTls).await.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("Database connection error: {}", e);
+            }
+        });
+        client
+            .batch_execute("DROP TABLE signatures; DROP TABLE spend_outpoints; DROP TABLE spend_txs; DROP TABLE version;")
+            .await
+            .expect("dropping tables");
+    }
+
+    #[test]
+    fn db_version_check() {
+        let rt = RuntimeBuilder::new_multi_thread()
+            .enable_all()
+            .thread_name("coordinatord_test_db")
+            .build()
+            .expect("Creating tokio runtime");
+
+        async fn run_test() {
+            let pg_config = postgre_setup().await;
+            let client = establish_connection(&pg_config).await.unwrap();
+
+            // The first call will create the DB
+            assert!(
+                client
+                    .query_opt("SELECT version FROM VERSION", &[])
+                    .await
+                    .is_err(),
+                "This relation shouldn't exist yet"
+            );
+            maybe_create_db(&pg_config).await.unwrap();
+            assert!(
+                client
+                    .query_opt("SELECT version FROM VERSION", &[])
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "It should have been populated already!"
+            );
+
+            // The second one will sanity check it's right
+            maybe_create_db(&pg_config).await.unwrap();
+
+            // We'll refuse to start if the version is from the future
+            let statement = client
+                .prepare_typed("UPDATE version SET version = 1", &[])
+                .await
+                .unwrap();
+            client.execute(&statement, &[]).await.unwrap();
+            assert!(maybe_create_db(&pg_config)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Unexpected database version"));
+
+            postgre_teardown(&pg_config).await;
+        }
+
+        rt.block_on(run_test());
+    }
+}
