@@ -18,6 +18,13 @@ direct connections between participants.**
 
 ## Usage
 
+### Trying out Revault
+
+If you just want to give Revault a shot, check out the [`aquarium`](https://github.com/revault/aquarium)
+(a script putting all the Revault parts together on a regtest network).
+
+### Using `coordinatord` itself
+
 The coordinator will need access to a PostgreSQL database, set in the configuration file as:
 ```
 postgres_uri = "postgresql://user:password@localhost:5432/database_name"
@@ -28,10 +35,6 @@ An easy way to try it out without having to configure Postgres on your system is
 docker run --rm -d -p 5432:5432 --name postgres-coordinatord -e POSTGRES_PASSWORD=revault -e POSTGRES_USER=revault -e POSTGRES_DB=coordinator_db postgres:alpine
 cargo run -- --conf contrib/config.toml
 ```
-
-For a more complete guide for setting up a demo Revault deployment, check out the tutorial in 
-[`revaultd`'s repository](https://github.com/revault/revaultd/)!
-
 
 ## Contributing
 
