@@ -691,8 +691,7 @@ dependencies = [
 [[package]]
 name = "revault_net"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d7581647856ce926493049324bbd0731fb67a34d6ecea676773fd7266617954"
+source = "git+https://github.com/revault/revault_net#694184858e4c839d99df5e64c5bb533925ffc059"
 dependencies = [
  "bitcoin",
  "log",

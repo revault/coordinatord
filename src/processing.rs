@@ -63,8 +63,7 @@ async fn get_spend_tx(
     deposit: &OutPoint,
 ) -> Option<ResponseResult> {
     match fetch_spend_tx(pg_config, deposit).await {
-        Ok(Some(transaction)) => Some(ResponseResult::SpendTx(SpendTx { transaction })),
-        Ok(None) => None, // FIXME: the message should be an option, and specified in practical-revault!!
+        Ok(transaction) => Some(ResponseResult::SpendTx(SpendTx { transaction })),
         Err(e) => {
             log::error!("Error while fetching Spend tx: '{}'", e);
             None
@@ -338,17 +337,27 @@ mod tests {
             "4e37824b0bd0843bb94c290956374ffa1752d4c6bc9089fcbd20e1e63518b25e:0",
         )
         .unwrap()];
-        assert_eq!(
-            set_spend_tx(pg_config, &deposit_outpoints, spend_tx.clone()).await,
-            ResponseResult::SetSpend(SetSpendResult { ack: true })
-        );
 
+        // We still haven't stored the spend
         let deposit_outpoint = deposit_outpoints[0];
         let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx {
-                transaction: spend_tx
+                transaction: None,
+            })
+        );
+
+        assert_eq!(
+            set_spend_tx(pg_config, &deposit_outpoints, spend_tx.clone()).await,
+            ResponseResult::SetSpend(SetSpendResult { ack: true })
+        );
+
+        let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
+        assert_eq!(
+            received,
+            ResponseResult::SpendTx(SpendTx {
+                transaction: Some(spend_tx)
             })
         );
 
@@ -375,7 +384,7 @@ mod tests {
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx {
-                transaction: second_spend_tx.clone()
+                transaction: Some(second_spend_tx.clone())
             })
         );
 
@@ -394,7 +403,7 @@ mod tests {
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx {
-                transaction: second_spend_tx
+                transaction: Some(second_spend_tx)
             })
         );
     }
