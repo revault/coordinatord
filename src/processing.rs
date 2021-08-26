@@ -88,78 +88,81 @@ pub async fn read_req(
     log::trace!("Reading a new message from '{:?}'", sender);
 
     stream
-        .read_req_async(|req_params| async {
-            match req_params {
-                // The get_sigs message can only be sent by a participant's wallet
-                RequestParams::GetSigs(ref msg) => {
-                    if matches!(
-                        sender,
-                        MessageSender::Manager
-                            | MessageSender::StakeHolder
-                            | MessageSender::ManagerStakeholder
-                    ) {
-                        Some(get_sigs(pg_config, msg).await)
-                    } else {
-                        log::error!("Unexpected get_sigs '{:?}' from '{:?}'", req_params, sender);
-                        None
-                    }
-                }
-                // The sig message can only be sent by a stakeholder's wallet
-                RequestParams::CoordSig(Sig {
-                    id,
-                    pubkey,
-                    signature,
-                }) => {
-                    if matches!(
-                        sender,
-                        MessageSender::StakeHolder | MessageSender::ManagerStakeholder
-                    ) {
-                        Some(set_sig(pg_config, id, pubkey, signature).await)
-                    } else {
-                        log::error!("Unexpected sig '{:?}' from '{:?}'", req_params, sender);
-                        None
-                    }
-                }
-                // The set_spend_tx message may only be sent by a manager's wallet
-                RequestParams::SetSpendTx(msg) => {
-                    if matches!(
-                        sender,
-                        MessageSender::Manager | MessageSender::ManagerStakeholder
-                    ) {
-                        Some(
-                            set_spend_tx(pg_config, &msg.deposit_outpoints.clone(), msg.spend_tx())
-                                .await,
-                        )
-                    } else {
-                        log::error!("Unexpected set_spend_tx from '{:?}'", sender);
-                        None
-                    }
-                }
-                // The get_spend_tx message may only be sent by a watchtower
-                // TODO: we may have to accept it from wallets too, as they may want to inspect it too.
-                RequestParams::GetSpendTx(GetSpendTx { deposit_outpoint }) => {
-                    if matches!(sender, MessageSender::WatchTower) {
-                        get_spend_tx(pg_config, &deposit_outpoint).await
-                    } else {
-                        log::error!(
-                            "Unexpected get_spend_tx '{:?}' from '{:?}'",
-                            req_params,
-                            sender
-                        );
-                        None
-                    }
-                }
-                // Any other message is not for us
-                _ => {
-                    log::error!(
-                        "Received unexpected request from stakeholder: '{:?}'",
-                        req_params
-                    );
-                    None
-                }
-            }
-        })
+        .read_req_async(|req_params| process_request(&pg_config, sender, req_params))
         .await
+}
+
+pub async fn process_request(
+    pg_config: &tokio_postgres::Config,
+    sender: MessageSender,
+    req_params: RequestParams,
+) -> Option<ResponseResult> {
+    match req_params {
+        // The get_sigs message can only be sent by a participant's wallet
+        RequestParams::GetSigs(ref msg) => {
+            if matches!(
+                sender,
+                MessageSender::Manager
+                    | MessageSender::StakeHolder
+                    | MessageSender::ManagerStakeholder
+            ) {
+                Some(get_sigs(pg_config, msg).await)
+            } else {
+                log::error!("Unexpected get_sigs '{:?}' from '{:?}'", req_params, sender);
+                None
+            }
+        }
+        // The sig message can only be sent by a stakeholder's wallet
+        RequestParams::CoordSig(Sig {
+            id,
+            pubkey,
+            signature,
+        }) => {
+            if matches!(
+                sender,
+                MessageSender::StakeHolder | MessageSender::ManagerStakeholder
+            ) {
+                Some(set_sig(pg_config, id, pubkey, signature).await)
+            } else {
+                log::error!("Unexpected sig '{:?}' from '{:?}'", req_params, sender);
+                None
+            }
+        }
+        // The set_spend_tx message may only be sent by a manager's wallet
+        RequestParams::SetSpendTx(msg) => {
+            if matches!(
+                sender,
+                MessageSender::Manager | MessageSender::ManagerStakeholder
+            ) {
+                Some(set_spend_tx(pg_config, &msg.deposit_outpoints.clone(), msg.spend_tx()).await)
+            } else {
+                log::error!("Unexpected set_spend_tx from '{:?}'", sender);
+                None
+            }
+        }
+        // The get_spend_tx message may only be sent by a watchtower
+        // TODO: we may have to accept it from wallets too, as they may want to inspect it too.
+        RequestParams::GetSpendTx(GetSpendTx { deposit_outpoint }) => {
+            if matches!(sender, MessageSender::WatchTower) {
+                get_spend_tx(pg_config, &deposit_outpoint).await
+            } else {
+                log::error!(
+                    "Unexpected get_spend_tx '{:?}' from '{:?}'",
+                    req_params,
+                    sender
+                );
+                None
+            }
+        }
+        // Any other message is not for us
+        _ => {
+            log::error!(
+                "Received unexpected request from stakeholder: '{:?}'",
+                req_params
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
