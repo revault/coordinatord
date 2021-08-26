@@ -29,3 +29,6 @@ tokio-postgres = "0.7"
 
 [dev-dependencies]
 revault_tx = { version = "0.3", features = ["use-serde"] }
+
+[features]
+fuzztesting = []
