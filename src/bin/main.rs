@@ -1,8 +1,4 @@
-mod config;
-mod coordinatord;
-mod db;
-mod processing;
-use crate::{
+use revault_coordinatord::{
     config::Config,
     coordinatord::CoordinatorD,
     db::maybe_create_db,
