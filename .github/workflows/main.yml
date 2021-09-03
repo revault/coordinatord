@@ -1,0 +1,45 @@
+name: CI
+
+on: [pull_request]
+
+jobs:
+  unittesting:
+    strategy:
+      matrix:
+        # We don't have a MSRV (yet?)
+        toolchain:
+          - stable
+          - nightly
+        os:
+          - ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v2
+      - name: Install Rust ${{ matrix.toolchain }} toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+          profile: minimal
+      - name: Build on Rust ${{ matrix.toolchain }}
+        env:
+          RUSTFLAGS: "-C link-dead-code"
+        run: cargo build --verbose --color always
+      - name: Start test database
+        run: docker run --rm -d -p 5432:5432 --name postgres-coordinatord -e POSTGRES_PASSWORD=revault -e POSTGRES_USER=revault -e POSTGRES_DB=coordinator_db postgres:alpine
+      - name: Test on Rust ${{ matrix.toolchain }}
+        env:
+          RUSTFLAGS: "-C link-dead-code"
+        run: cargo test --verbose --color always --all-features
+
+  rustfmt_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - uses: actions-rs/toolchain@v1
+        with:
+            toolchain: stable
+            components: rustfmt
+            override: true
+      - run: cargo fmt -- --check

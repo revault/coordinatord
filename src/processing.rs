@@ -343,9 +343,7 @@ mod tests {
         let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
         assert_eq!(
             received,
-            ResponseResult::SpendTx(SpendTx {
-                transaction: None,
-            })
+            ResponseResult::SpendTx(SpendTx { transaction: None })
         );
 
         assert_eq!(
