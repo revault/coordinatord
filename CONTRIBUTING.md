@@ -59,6 +59,28 @@ docker run --rm -d -p 5432:5432 --name postgres-coordinatord -e POSTGRES_PASSWOR
 cargo test
 ```
 
+## Fuzzing
+
+You'll need [honggfuzz-rs](https://github.com/rust-fuzz/honggfuzz-rs) for running fuzz tests.
+
+Also, you'll need a running Postgres database. The tests will look for a database at
+`postgresql://revault:revault@localhost:5432/fuzz_coordinator`, but you can modify
+the uri using the `POSTGRES_URI` environment variable.
+
+```
+cd fuzz/ && cargo hfuzz run send_msg
+```
+
+You should definitely clone the existing corpus for the `send_msg` target and start extending it from there. For example:
+
+```
+# Still from the root of the fuzz/ directory
+git clone https://github.com/revault/coordinatord_fuzz_corpus
+HFUZZ_RUN_ARGS="--exit_upon_crash -v --input coordinatord_fuzz_corpus" cargo hfuzz run send_msg
+```
+
+Refer to [Honggfuzz's doc](https://github.com/google/honggfuzz/blob/master/docs/USAGE.md#cmdline---help) for more run options.
+
 
 # Style
 
