@@ -1,4 +1,4 @@
-use crate::db::{fetch_sigs, fetch_spend_tx, store_sig, store_spend_tx};
+use crate::db::{fetch_sigs, fetch_spend_tx, store_sig, store_spend_tx, DbError};
 use revault_net::{
     bitcoin::{
         secp256k1::{PublicKey as SecpPubKey, Signature},
@@ -35,6 +35,15 @@ async fn set_sig(
 ) -> ResponseResult {
     match store_sig(&pg_config, txid, pubkey, signature).await {
         Ok(()) => ResponseResult::Sig(SigResult { ack: true }),
+        Err(DbError::Duplicate) => {
+            log::info!(
+                "Ignoring duplicate (txid {}, pubkey {}, sig {})",
+                txid,
+                pubkey,
+                signature
+            );
+            ResponseResult::Sig(SigResult { ack: true })
+        }
         Err(e) => {
             log::error!("Error while storing Sig: '{}'", e);
             ResponseResult::Sig(SigResult { ack: false })
