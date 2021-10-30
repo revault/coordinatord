@@ -41,13 +41,19 @@ jobs:
       - name: Install Rust nightly toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
           override: true
           profile: minimal
       - name: Start test database
         run: docker run --rm -d -p 5432:5432 --name postgres-coordinatord -e POSTGRES_PASSWORD=revault -e POSTGRES_USER=revault -e POSTGRES_DB=fuzz_coordinator postgres:alpine
       - name: Run fuzz testing script
-        run: sudo apt install build-essential binutils-dev libunwind-dev libblocksruntime-dev liblzma-dev && cargo install --force honggfuzz && cd fuzz && git clone https://github.com/revault/coordinatord_fuzz_corpus && RUSTFLAGS="-Znew-llvm-pass-manager=no" HFUZZ_RUN_ARGS="--exit_upon_crash --iterations 10000 -v --timeout 2 --input coordinatord_fuzz_corpus" cargo hfuzz run send_msg && cd ..
+        run: |
+          sudo apt update
+          sudo apt install build-essential binutils-dev libunwind-dev libblocksruntime-dev liblzma-dev
+
+          cargo install --force honggfuzz
+          cd fuzz && git clone https://github.com/revault/coordinatord_fuzz_corpus
+          RUSTFLAGS="-Znew-llvm-pass-manager=no" HFUZZ_RUN_ARGS="--exit_upon_crash --iterations 10000 -v --timeout 2 --input coordinatord_fuzz_corpus" cargo hfuzz run send_msg
 
   rustfmt_check:
     runs-on: ubuntu-latest
