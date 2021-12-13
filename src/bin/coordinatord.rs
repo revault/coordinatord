@@ -221,10 +221,9 @@ async fn tokio_main(
 }
 
 fn main() {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(target_family = "unix"))]
     {
-        // FIXME: All Unix should be fine?
-        eprintln!("Only Linux is supported for now.");
+        eprintln!("Only Unix is supported for now.");
         process::exit(1);
     }
 
