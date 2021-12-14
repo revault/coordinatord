@@ -310,6 +310,23 @@ mod tests {
             })
         );
 
+        // We can store a different signature for the same pubkey...
+        let another_sig_a = Signature::from_str("304402201a3109a4a6445c1e56416bc39520aada5c8ad089e69ee4f1a40a0901de1a435302204b281ba97da2ab2e40eb65943ae414cc4307406c5eb177b1c646606839a2e99d").unwrap();
+        assert_eq!(
+            set_sig(pg_config, txid_a, pubkey_a, another_sig_a.clone()).await,
+            ResponseResult::Sig(SigResult { ack: true })
+        );
+
+        // ...the db will just update it
+        let mut signatures_a = BTreeMap::new();
+        signatures_a.insert(pubkey_a, another_sig_a);
+        assert_eq!(
+            get_sigs(pg_config, &GetSigs { id: txid_a }).await,
+            ResponseResult::Sigs(Sigs {
+                signatures: signatures_a.clone()
+            })
+        );
+
         // We can add more sigs for the same txid, and we'll get all of them
         let pubkey_c = PublicKey::from_str(
             "028c887a4a78211ff320802134046cb1db92215614ac0a078c261ed860f3067f0f",

@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS version (
 CREATE TABLE IF NOT EXISTS signatures (
     txid BYTEA NOT NULL,
     pubkey BYTEA NOT NULL,
-    signature BYTEA UNIQUE NOT NULL
+    signature BYTEA UNIQUE NOT NULL,
+    UNIQUE (txid, pubkey)
 );
 
 CREATE TABLE IF NOT EXISTS spend_txs (
