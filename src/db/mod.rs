@@ -103,7 +103,8 @@ pub async fn store_sig(
 
     let statement = client
         .prepare_typed(
-            "INSERT INTO signatures (txid, pubkey, signature) VALUES ($1, $2, $3)",
+            "INSERT INTO signatures (txid, pubkey, signature) VALUES ($1, $2, $3) \
+             ON CONFLICT(txid, pubkey) DO UPDATE SET signature=$3",
             &[Type::BYTEA, Type::BYTEA, Type::BYTEA],
         )
         .await?;
