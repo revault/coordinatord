@@ -1,11 +1,11 @@
 [package]
 name = "revault_coordinatord"
-version = "0.0.2"
+version = "0.0.3"
 authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
-revault_net = { git = "https://github.com/revault/revault_net" }
+revault_net = "0.2.1"
 
 tokio = { version = "1.0", features = ["io-util",  "macros", "net", "rt-multi-thread"] }
 
