@@ -220,6 +220,44 @@ pub async fn fetch_spend_tx(
     Ok(spend_tx.map(|tx| encode::deserialize(&tx).expect("Added to DB with serialize()")))
 }
 
+pub async fn fetch_spend_txs_to_broadcast(
+    config: &tokio_postgres::Config,
+) -> Result<Vec<BitcoinTransaction>, tokio_postgres::Error> {
+    let client = establish_connection(config).await?;
+
+    let statement = client
+        .prepare_typed(
+            "SELECT transaction FROM spend_txs WHERE broadcasted = FALSE",
+            &[],
+        )
+        .await?;
+    let spend_txs = client
+        .query(&statement, &[])
+        .await?
+        .into_iter()
+        .map(|row| row.get::<_, Vec<u8>>(0))
+        .map(|tx| encode::deserialize(&tx).expect("Added to DB with serialize()"))
+        .collect();
+
+    Ok(spend_txs)
+}
+
+pub async fn mark_broadcasted_spend(
+    config: &tokio_postgres::Config,
+    txid: &Txid,
+) -> Result<(), tokio_postgres::Error> {
+    let client = establish_connection(config).await?;
+
+    let statement = client
+        .prepare_typed(
+            "UPDATE spend_txs SET broadcasted = TRUE WHERE txid = $1",
+            &[Type::BYTEA],
+        )
+        .await?;
+    client.execute(&statement, &[&txid.as_ref()]).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::db::*;
