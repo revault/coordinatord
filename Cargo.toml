@@ -27,6 +27,9 @@ chrono = "0.4"
 # Used for storing the signatures and spend transactions
 tokio-postgres = "0.7"
 
+# To talk to bitcoind
+jsonrpc = "0.12"
+
 [dev-dependencies]
 revault_tx = { version = "0.3", features = ["use-serde"] }
 

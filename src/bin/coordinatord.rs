@@ -1,8 +1,10 @@
 use revault_coordinatord::{
+    bitcoind::BitcoinD,
     config::Config,
     coordinatord::CoordinatorD,
     db::maybe_create_db,
     processing::{read_req, MessageSender},
+    spend_broadcaster::spend_broadcaster,
 };
 use revault_net::{
     bitcoin::hashes::hex::ToHex,
@@ -160,7 +162,17 @@ async fn tokio_main(
     // replication.
     maybe_create_db(&coordinatord.postgres_config).await?;
     let postgres_config = Arc::new(coordinatord.postgres_config);
+    let bitcoind = BitcoinD::new(&coordinatord.bitcoind_config).await?;
+    let pg_config = postgres_config.clone();
 
+    tokio::spawn(async move {
+        spend_broadcaster(bitcoind, pg_config)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Error broadcasting txs: {}", e);
+                process::exit(1);
+            })
+    });
     // Who we are accepting connections from. Note that we of course trust them and
     // therefore don't make a big deal of DOS protection.
     let managers_keys = coordinatord.managers_keys;

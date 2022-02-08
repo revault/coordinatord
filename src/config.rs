@@ -2,7 +2,9 @@ use revault_net::{noise::PublicKey as NoisePubKey, sodiumoxide};
 
 use std::{net::SocketAddr, path::PathBuf, vec::Vec};
 
-use serde::{de, Deserialize};
+use serde::{de, Deserialize, Deserializer};
+
+use tokio::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct NoisePubkeyHex {
@@ -53,6 +55,32 @@ impl<'de> Deserialize<'de> for NoisePubkeyHex {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct BitcoindConfig {
+    /// Path to bitcoind's cookie file, to authenticate the RPC connection
+    pub cookie_path: PathBuf,
+    /// The IP:port bitcoind's RPC is listening on
+    pub addr: SocketAddr,
+    /// How often the coordinator tries to broadcast all the spends it knows
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        default = "default_broadcast_interval"
+    )]
+    pub broadcast_interval: Duration,
+}
+
+fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let secs = u64::deserialize(deserializer)?;
+    Ok(Duration::from_secs(secs))
+}
+
+fn default_broadcast_interval() -> Duration {
+    Duration::from_secs(60 * 5)
+}
+
 /// Static informations we require to operate
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -73,6 +101,8 @@ pub struct Config {
     pub log_level: Option<String>,
     /// <ip:port> to bind to
     pub listen: Option<SocketAddr>,
+    /// Everything we need to know to talk to bitcoind
+    pub bitcoind_config: BitcoindConfig,
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -153,6 +183,10 @@ mod tests {
                             "14f5cd87c7f09e1e7542ca4fc874bd113cfa47c68c8927fcf8f2c07819fd86da", "6a3f052859e7eae3574b657fe3710c698f6301acdda8724e6ff0f6bfa488024d"]
             watchtowers = ["17e884097e6f0fc7598dfce7bc3bcabe38107a5c186ebb0bbc80f029a2dd7ca4", "66a85b365912da419675fd11388c90c2ec9b723f42e765f7ff0dae6735dccb1a",
                             "39f246fa212256a506b7c5777910c41af2a0544b5e7d4683bde54e8ad523e850", "79ed4f33d77b57189e30caf49edb0594aa687f7ce1ab655758ddfbb5d13c95e4"]
+            [bitcoind_config]
+            cookie_path = "/home/something/.bitcoin/regtest/.cookie"
+            addr = "127.0.0.1:9000"
+            broadcast_interval = 300
         "#;
         let _config: Config = toml::from_str(toml_str).expect("Deserializing toml_str");
     }

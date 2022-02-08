@@ -1,4 +1,4 @@
-use crate::config::{datadir_path, Config, ConfigError};
+use crate::config::{datadir_path, BitcoindConfig, Config, ConfigError};
 use revault_net::noise::PublicKey as NoisePubKey;
 
 use std::{fs, net::SocketAddr, os::unix::fs::DirBuilderExt, path::PathBuf, str::FromStr};
@@ -16,6 +16,8 @@ pub struct CoordinatorD {
 
     // For storing the signatures and spend transactions
     pub postgres_config: tokio_postgres::Config,
+
+    pub bitcoind_config: BitcoindConfig,
 }
 
 fn create_datadir(datadir_path: &PathBuf) -> Result<(), std::io::Error> {
@@ -57,6 +59,7 @@ impl CoordinatorD {
             daemon,
             listen,
             postgres_config,
+            bitcoind_config: config.bitcoind_config,
         })
     }
 
