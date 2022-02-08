@@ -11,7 +11,7 @@ use schema::SCHEMA;
 
 use std::{collections::BTreeMap, fmt};
 
-use tokio_postgres::{types::Type, Client, NoTls};
+use tokio_postgres::{error::SqlState, types::Type, Client, NoTls};
 
 pub const DB_VERSION: i32 = 0;
 
@@ -90,17 +90,6 @@ pub async fn store_sig(
     let client = establish_connection(config).await?;
     let sig = signature.serialize_der();
 
-    // Make sure it's not here already
-    let statement = client
-        .prepare_typed(
-            "SELECT signature FROM signatures WHERE signature = $1",
-            &[Type::BYTEA],
-        )
-        .await?;
-    if !client.query(&statement, &[&sig.as_ref()]).await?.is_empty() {
-        return Err(DbError::Duplicate);
-    }
-
     let statement = client
         .prepare_typed(
             "INSERT INTO signatures (txid, pubkey, signature) VALUES ($1, $2, $3) \
@@ -108,12 +97,29 @@ pub async fn store_sig(
             &[Type::BYTEA, Type::BYTEA, Type::BYTEA],
         )
         .await?;
-    client
+
+    if let Err(e) = client
         .execute(
             &statement,
             &[&txid.as_ref(), &pubkey.serialize().as_ref(), &sig.as_ref()],
         )
-        .await?;
+        .await
+    {
+        log::debug!("We have a statement error in store_sig: {:?}", e);
+        if let Some(e) = e.as_db_error() {
+            log::debug!(
+                "We have a db error {:?} with code {:?}",
+                e.clone(),
+                e.clone().code()
+            );
+            if *e.code() == SqlState::UNIQUE_VIOLATION {
+                // Ah, it was trying to insert a signature that was there already.
+                // Alright.
+                return Err(DbError::Duplicate);
+            }
+        }
+        return Err(e.into());
+    }
 
     Ok(())
 }
