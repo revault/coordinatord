@@ -16,7 +16,6 @@ use revault_net::{
 use std::{
     env, fs,
     io::{self, Read, Write},
-    net::TcpListener,
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process,
@@ -25,7 +24,7 @@ use std::{
 };
 
 use daemonize_simple::Daemonize;
-use tokio::runtime::Builder as RuntimeBuilder;
+use tokio::{net::TcpListener, runtime::Builder as RuntimeBuilder};
 
 // No need for complex argument parsing: we only ever accept one, "--conf".
 fn parse_args(args: Vec<String>) -> Option<PathBuf> {
@@ -114,12 +113,10 @@ fn read_or_create_noise_key(secret_file: PathBuf) -> NoisePrivKey {
 async fn connection_handler(
     mut stream: KKTransport,
     msg_sender: MessageSender,
-    pg_config: Arc<tokio_postgres::Config>,
+    pg_config: &tokio_postgres::Config,
 ) {
-    let pg_config = &*pg_config;
-
     loop {
-        match read_req(pg_config, &mut stream, msg_sender).await {
+        match read_req(&pg_config, &mut stream, msg_sender).await {
             Err(revault_net::Error::Transport(e)) => {
                 if matches!(
                     e.kind(),
@@ -156,79 +153,77 @@ async fn tokio_main(
     coordinatord: CoordinatorD,
     noise_secret: NoisePrivKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let coordinatord = Arc::new(coordinatord);
     // We use PostgreSQL for storing the signatures and spend transactions. That may
     // seem overkill for now, but this server is expected to grow and we'll probably
     // use more Postgre feature soon. For one, Postgre makes it easy to setup database
     // replication.
     maybe_create_db(&coordinatord.postgres_config).await?;
-    let postgres_config = Arc::new(coordinatord.postgres_config);
     let bitcoind = BitcoinD::new(&coordinatord.bitcoind_config).await?;
-    let pg_config = postgres_config.clone();
+    let pg_config = coordinatord.postgres_config.clone();
 
     tokio::spawn(async move {
-        spend_broadcaster(bitcoind, pg_config)
+        spend_broadcaster(bitcoind, &pg_config)
             .await
             .unwrap_or_else(|e| {
                 eprintln!("Error broadcasting txs: {}", e);
                 process::exit(1);
             })
     });
-    // Who we are accepting connections from. Note that we of course trust them and
-    // therefore don't make a big deal of DOS protection.
-    let managers_keys = coordinatord.managers_keys;
-    let stakeholders_keys = coordinatord.stakeholders_keys;
-    let watchtowers_keys = coordinatord.watchtowers_keys;
-    let client_pubkeys: Vec<NoisePubKey> = managers_keys
-        .clone()
-        .into_iter()
-        .chain(stakeholders_keys.clone().into_iter())
-        .chain(watchtowers_keys.clone().into_iter())
-        .collect();
 
-    // FIXME: implement a tokio feature upstream and use Tokio's TcpListener
-    let listener = TcpListener::bind(coordinatord.listen)?;
+    let listener = TcpListener::bind(coordinatord.listen).await?;
 
     loop {
-        // This does the Noise KK handshake..
-        let kk_stream =
-            revault_net::transport::KKTransport::accept(&listener, &noise_secret, &client_pubkeys);
+        let (connection, _) = listener.accept().await?;
 
-        match kk_stream {
-            // .. So from here we are automagically using an AEAD stream
-            Ok(stream) => {
-                // Now figure out who's talking to us
-                let their_pubkey = stream.remote_static();
-                let msg_sender = match (
-                    managers_keys.contains(&their_pubkey),
-                    stakeholders_keys.contains(&their_pubkey),
-                    watchtowers_keys.contains(&their_pubkey),
-                ) {
-                    (_, _, true) => MessageSender::WatchTower,
-                    (m, s, false) => match (m, s) {
-                        (true, true) => MessageSender::ManagerStakeholder,
-                        (true, false) => MessageSender::Manager,
-                        (false, true) => MessageSender::StakeHolder,
-                        (false, false) => {
-                            unreachable!("An unknown key was able to perform the handshake?")
-                        }
-                    },
-                };
+        let coordinatord = coordinatord.clone();
+        let noise_secret = noise_secret.clone();
 
-                let pg_config = postgres_config.clone();
-                log::trace!(
-                    "Got a new connection from a {:?} with key '{}'",
-                    msg_sender,
-                    their_pubkey.0.to_hex()
-                );
+        tokio::spawn(async move {
+            let connection = connection.into_std().unwrap();
+            // into_std set the nonblocking mode to true
+            // because the process is now in a thread
+            // reading in the stream can and need to be blocking.
+            connection.set_nonblocking(false).unwrap();
 
-                tokio::spawn(
-                    async move { connection_handler(stream, msg_sender, pg_config).await },
-                );
+            // This does the Noise KK handshake..
+            match revault_net::transport::KKTransport::accept(
+                connection,
+                &noise_secret,
+                &coordinatord.client_pubkeys(),
+            ) {
+                // .. So from here we are automagically using an AEAD stream
+                Ok(stream) => {
+                    // Now figure out who's talking to us
+                    let their_pubkey = stream.remote_static();
+                    let msg_sender = match (
+                        coordinatord.managers_keys.contains(&their_pubkey),
+                        coordinatord.stakeholders_keys.contains(&their_pubkey),
+                        coordinatord.watchtowers_keys.contains(&their_pubkey),
+                    ) {
+                        (_, _, true) => MessageSender::WatchTower,
+                        (m, s, false) => match (m, s) {
+                            (true, true) => MessageSender::ManagerStakeholder,
+                            (true, false) => MessageSender::Manager,
+                            (false, true) => MessageSender::StakeHolder,
+                            (false, false) => {
+                                unreachable!("An unknown key was able to perform the handshake?")
+                            }
+                        },
+                    };
+
+                    log::trace!(
+                        "Got a new connection from a {:?} with key '{}'",
+                        msg_sender,
+                        their_pubkey.0.to_hex()
+                    );
+                    connection_handler(stream, msg_sender, &coordinatord.postgres_config).await
+                }
+                Err(e) => {
+                    log::error!("Accepting new connection: '{}'", e);
+                }
             }
-            Err(e) => {
-                log::error!("Accepting new connection: '{}'", e);
-            }
-        }
+        });
     }
 }
 

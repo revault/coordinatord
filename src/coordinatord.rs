@@ -83,4 +83,13 @@ impl CoordinatorD {
     pub fn secret_file(&self) -> PathBuf {
         self.file_from_datadir("noise_secret")
     }
+
+    pub fn client_pubkeys(&self) -> Vec<NoisePubKey> {
+        self.managers_keys
+            .clone()
+            .into_iter()
+            .chain(self.stakeholders_keys.clone().into_iter())
+            .chain(self.watchtowers_keys.clone().into_iter())
+            .collect()
+    }
 }

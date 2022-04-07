@@ -5,7 +5,7 @@ authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
-revault_net = "0.2.1"
+revault_net = { git = "https://github.com/revault/revault_net", branch = "master" }
 
 tokio = { version = "1.0", features = ["io-util",  "macros", "net", "rt-multi-thread"] }
 
