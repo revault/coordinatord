@@ -9,7 +9,12 @@ use revault_net::{
 };
 use schema::SCHEMA;
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt, io, thread,
+    time::{Duration, Instant},
+};
 
 use tokio_postgres::{error::SqlState, types::Type, Client, NoTls};
 
@@ -46,18 +51,43 @@ impl From<tokio_postgres::Error> for DbError {
     }
 }
 
+const CONNECTION_RETRY_TIMEOUT: u64 = 120;
+
+// Establish a connection, retrying for CONNECTION_RETRY_TIMEOUT seconds on a connection error to
+// the Postgre server.
 async fn establish_connection(
     config: &tokio_postgres::Config,
 ) -> Result<Client, tokio_postgres::Error> {
-    let (client, connection) = config.connect(NoTls).await?;
+    let start = Instant::now();
 
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            log::error!("Database connection error: {}", e);
+    loop {
+        match config.connect(NoTls).await {
+            Ok((client, connection)) => {
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        log::error!("Database connection error: {}", e);
+                    }
+                });
+
+                return Ok(client);
+            }
+            Err(e) => {
+                // The only way to check whether it's a connection error is to downcast.
+                if e.source()
+                    .map(|e| e.downcast_ref::<io::Error>())
+                    .flatten()
+                    .is_some()
+                    && Instant::now().duration_since(start)
+                        < Duration::from_secs(CONNECTION_RETRY_TIMEOUT)
+                {
+                    thread::sleep(Duration::from_secs(1));
+                    continue;
+                } else {
+                    return Err(e);
+                }
+            }
         }
-    });
-
-    Ok(client)
+    }
 }
 
 pub async fn maybe_create_db(config: &tokio_postgres::Config) -> Result<(), DbError> {
