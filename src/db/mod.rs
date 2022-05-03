@@ -55,8 +55,9 @@ const CONNECTION_RETRY_TIMEOUT: u64 = 120;
 
 // Establish a connection, retrying for CONNECTION_RETRY_TIMEOUT seconds on a connection error to
 // the Postgre server.
-async fn establish_connection(
+async fn establish_connection_helper(
     config: &tokio_postgres::Config,
+    failfast: bool,
 ) -> Result<Client, tokio_postgres::Error> {
     let start = Instant::now();
 
@@ -79,6 +80,7 @@ async fn establish_connection(
                     .is_some()
                     && Instant::now().duration_since(start)
                         < Duration::from_secs(CONNECTION_RETRY_TIMEOUT)
+                    && !failfast
                 {
                     thread::sleep(Duration::from_secs(1));
                     continue;
@@ -90,8 +92,20 @@ async fn establish_connection(
     }
 }
 
+async fn establish_connection(
+    config: &tokio_postgres::Config,
+) -> Result<Client, tokio_postgres::Error> {
+    establish_connection_helper(config, false).await
+}
+
+async fn establish_connection_failfast(
+    config: &tokio_postgres::Config,
+) -> Result<Client, tokio_postgres::Error> {
+    establish_connection_helper(config, true).await
+}
+
 pub async fn maybe_create_db(config: &tokio_postgres::Config) -> Result<(), DbError> {
-    let client = establish_connection(config).await?;
+    let client = establish_connection_failfast(config).await?;
 
     client.batch_execute(SCHEMA).await?;
     let db_version = client.query_opt("SELECT version FROM VERSION", &[]).await?;
