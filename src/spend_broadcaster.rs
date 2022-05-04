@@ -3,11 +3,10 @@ use crate::{
     db::{fetch_spend_txs_to_broadcast, mark_broadcasted_spend},
 };
 use jsonrpc::error::{Error, RpcError};
-use std::sync::Arc;
 
 pub async fn spend_broadcaster(
     bitcoind: BitcoinD,
-    config: Arc<tokio_postgres::Config>,
+    config: &tokio_postgres::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut interval = tokio::time::interval(bitcoind.broadcast_interval);
     loop {
