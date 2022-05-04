@@ -2,7 +2,7 @@ use revault_coordinatord::{
     bitcoind::BitcoinD,
     config::Config,
     coordinatord::CoordinatorD,
-    db::maybe_create_db,
+    db::{maybe_create_db, DbConnection},
     processing::{read_req, MessageSender},
     spend_broadcaster::spend_broadcaster,
 };
@@ -115,8 +115,16 @@ async fn connection_handler(
     msg_sender: MessageSender,
     pg_config: &tokio_postgres::Config,
 ) {
+    let mut db_conn = match DbConnection::new(pg_config).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::error!("Error establishing connection to the database: {:?}", e);
+            return;
+        }
+    };
+
     loop {
-        match read_req(&pg_config, &mut stream, msg_sender).await {
+        match read_req(&mut db_conn, &mut stream, msg_sender).await {
             Err(revault_net::Error::Transport(e)) => {
                 if matches!(
                     e.kind(),
