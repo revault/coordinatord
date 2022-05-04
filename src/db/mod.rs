@@ -53,8 +53,25 @@ impl From<tokio_postgres::Error> for DbError {
 
 const CONNECTION_RETRY_TIMEOUT: u64 = 120;
 
-// Establish a connection, retrying for CONNECTION_RETRY_TIMEOUT seconds on a connection error to
-// the Postgre server.
+// Determine whether this error is a transient connection error
+fn is_connection_error(error: &tokio_postgres::Error) -> bool {
+    error.as_db_error().map(|e| {
+        e.code() == &SqlState::CONNECTION_FAILURE
+            || e.code() == &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION
+            || e.code() == &SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION
+            || e.code() == &SqlState::TOO_MANY_CONNECTIONS
+            || e.code() == &SqlState::CANNOT_CONNECT_NOW
+            || e.code() == &SqlState::FDW_UNABLE_TO_ESTABLISH_CONNECTION
+    }) == Some(true)
+        || error
+            .source()
+            .map(|e| e.downcast_ref::<io::Error>())
+            .flatten()
+            .is_some()
+}
+
+// Establish a connection, retrying for CONNECTION_RETRY_TIMEOUT seconds on a transient connection
+// error to the Postgre server.
 async fn establish_connection_helper(
     config: &tokio_postgres::Config,
     failfast: bool,
@@ -73,18 +90,17 @@ async fn establish_connection_helper(
                 return Ok(client);
             }
             Err(e) => {
-                // The only way to check whether it's a connection error is to downcast.
-                if e.source()
-                    .map(|e| e.downcast_ref::<io::Error>())
-                    .flatten()
-                    .is_some()
-                    && Instant::now().duration_since(start)
-                        < Duration::from_secs(CONNECTION_RETRY_TIMEOUT)
-                    && !failfast
-                {
-                    thread::sleep(Duration::from_secs(1));
+                log::error!("Error when trying to connect to the database: {:?}", e);
+                let timed_out = Instant::now().duration_since(start)
+                    >= Duration::from_secs(CONNECTION_RETRY_TIMEOUT);
+
+                if is_connection_error(&e) && !timed_out && !failfast {
+                    thread::sleep(Duration::from_secs(2));
                     continue;
                 } else {
+                    if timed_out {
+                        log::error!("Timed out trying to connect to the database.",);
+                    }
                     return Err(e);
                 }
             }
