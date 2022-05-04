@@ -53,8 +53,25 @@ impl From<tokio_postgres::Error> for DbError {
 
 const CONNECTION_RETRY_TIMEOUT: u64 = 120;
 
-// Establish a connection, retrying for CONNECTION_RETRY_TIMEOUT seconds on a connection error to
-// the Postgre server.
+// Determine whether this error is a transient connection error
+fn is_connection_error(error: &tokio_postgres::Error) -> bool {
+    error.as_db_error().map(|e| {
+        e.code() == &SqlState::CONNECTION_FAILURE
+            || e.code() == &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION
+            || e.code() == &SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION
+            || e.code() == &SqlState::TOO_MANY_CONNECTIONS
+            || e.code() == &SqlState::CANNOT_CONNECT_NOW
+            || e.code() == &SqlState::FDW_UNABLE_TO_ESTABLISH_CONNECTION
+    }) == Some(true)
+        || error
+            .source()
+            .map(|e| e.downcast_ref::<io::Error>())
+            .flatten()
+            .is_some()
+}
+
+// Establish a connection, retrying for CONNECTION_RETRY_TIMEOUT seconds on a transient connection
+// error to the Postgre server.
 async fn establish_connection_helper(
     config: &tokio_postgres::Config,
     failfast: bool,
@@ -73,18 +90,17 @@ async fn establish_connection_helper(
                 return Ok(client);
             }
             Err(e) => {
-                // The only way to check whether it's a connection error is to downcast.
-                if e.source()
-                    .map(|e| e.downcast_ref::<io::Error>())
-                    .flatten()
-                    .is_some()
-                    && Instant::now().duration_since(start)
-                        < Duration::from_secs(CONNECTION_RETRY_TIMEOUT)
-                    && !failfast
-                {
-                    thread::sleep(Duration::from_secs(1));
+                log::error!("Error when trying to connect to the database: {:?}", e);
+                let timed_out = Instant::now().duration_since(start)
+                    >= Duration::from_secs(CONNECTION_RETRY_TIMEOUT);
+
+                if is_connection_error(&e) && !timed_out && !failfast {
+                    thread::sleep(Duration::from_secs(2));
                     continue;
                 } else {
+                    if timed_out {
+                        log::error!("Timed out trying to connect to the database.",);
+                    }
                     return Err(e);
                 }
             }
@@ -125,103 +141,110 @@ pub async fn maybe_create_db(config: &tokio_postgres::Config) -> Result<(), DbEr
     Ok(())
 }
 
-pub async fn store_sig(
-    config: &tokio_postgres::Config,
-    txid: Txid,
-    pubkey: PublicKey,
-    signature: Signature,
-) -> Result<(), DbError> {
-    let client = establish_connection(config).await?;
-    let sig = signature.serialize_der();
+pub struct DbConnection {
+    client: Client,
+}
 
-    let statement = client
-        .prepare_typed(
-            "INSERT INTO signatures (txid, pubkey, signature) VALUES ($1, $2, $3) \
+impl DbConnection {
+    pub async fn new(config: &tokio_postgres::Config) -> Result<Self, DbError> {
+        let client = establish_connection(config).await?;
+        Ok(Self { client })
+    }
+
+    pub async fn store_sig(
+        &self,
+        txid: Txid,
+        pubkey: PublicKey,
+        signature: Signature,
+    ) -> Result<(), DbError> {
+        let sig = signature.serialize_der();
+
+        let statement = self
+            .client
+            .prepare_typed(
+                "INSERT INTO signatures (txid, pubkey, signature) VALUES ($1, $2, $3) \
              ON CONFLICT(txid, pubkey) DO UPDATE SET signature=$3",
-            &[Type::BYTEA, Type::BYTEA, Type::BYTEA],
-        )
-        .await?;
+                &[Type::BYTEA, Type::BYTEA, Type::BYTEA],
+            )
+            .await?;
 
-    if let Err(e) = client
-        .execute(
-            &statement,
-            &[&txid.as_ref(), &pubkey.serialize().as_ref(), &sig.as_ref()],
-        )
-        .await
-    {
-        log::debug!("We have a statement error in store_sig: {:?}", e);
-        if let Some(e) = e.as_db_error() {
-            log::debug!(
-                "We have a db error {:?} with code {:?}",
-                e.clone(),
-                e.clone().code()
-            );
-            if *e.code() == SqlState::UNIQUE_VIOLATION {
-                // Ah, it was trying to insert a signature that was there already.
-                // Alright.
-                return Err(DbError::Duplicate);
+        if let Err(e) = self
+            .client
+            .execute(
+                &statement,
+                &[&txid.as_ref(), &pubkey.serialize().as_ref(), &sig.as_ref()],
+            )
+            .await
+        {
+            log::debug!("We have a statement error in store_sig: {:?}", e);
+            if let Some(e) = e.as_db_error() {
+                log::debug!(
+                    "We have a db error {:?} with code {:?}",
+                    e.clone(),
+                    e.clone().code()
+                );
+                if *e.code() == SqlState::UNIQUE_VIOLATION {
+                    // Ah, it was trying to insert a signature that was there already.
+                    // Alright.
+                    return Err(DbError::Duplicate);
+                }
             }
+            return Err(e.into());
         }
-        return Err(e.into());
+
+        Ok(())
     }
 
-    Ok(())
-}
+    pub async fn fetch_sigs(&self, txid: Txid) -> Result<Sigs, tokio_postgres::Error> {
+        let mut signatures: BTreeMap<PublicKey, Signature> = BTreeMap::new();
 
-pub async fn fetch_sigs(
-    config: &tokio_postgres::Config,
-    txid: Txid,
-) -> Result<Sigs, tokio_postgres::Error> {
-    let client = establish_connection(config).await?;
-    let mut signatures: BTreeMap<PublicKey, Signature> = BTreeMap::new();
+        let statement = self
+            .client
+            .prepare_typed(
+                "SELECT pubkey, signature FROM signatures WHERE txid = $1",
+                &[Type::BYTEA],
+            )
+            .await?;
+        for row in self.client.query(&statement, &[&txid.as_ref()]).await? {
+            let pubkey: &[u8] = row.get(0);
+            let pubkey = PublicKey::from_slice(&pubkey).expect("We input a compressed pubkey");
+            let sig: Vec<u8> = row.get(1);
 
-    let statement = client
-        .prepare_typed(
-            "SELECT pubkey, signature FROM signatures WHERE txid = $1",
-            &[Type::BYTEA],
-        )
-        .await?;
-    for row in client.query(&statement, &[&txid.as_ref()]).await? {
-        let pubkey: &[u8] = row.get(0);
-        let pubkey = PublicKey::from_slice(&pubkey).expect("We input a compressed pubkey");
-        let sig: Vec<u8> = row.get(1);
+            signatures.insert(
+                pubkey,
+                Signature::from_der(&sig).expect("We input to_der()"),
+            );
+        }
 
-        signatures.insert(
-            pubkey,
-            Signature::from_der(&sig).expect("We input to_der()"),
-        );
+        Ok(Sigs { signatures })
     }
 
-    Ok(Sigs { signatures })
-}
+    pub async fn store_spend_tx(
+        &mut self,
+        outpoints: &Vec<OutPoint>,
+        transaction: BitcoinTransaction,
+    ) -> Result<(), tokio_postgres::Error> {
+        let bitcoin_txid = encode::serialize(&transaction.txid());
+        let bitcoin_tx = encode::serialize(&transaction);
 
-pub async fn store_spend_tx(
-    config: &tokio_postgres::Config,
-    outpoints: &Vec<OutPoint>,
-    transaction: BitcoinTransaction,
-) -> Result<(), tokio_postgres::Error> {
-    let mut client = establish_connection(config).await?;
-    let bitcoin_txid = encode::serialize(&transaction.txid());
-    let bitcoin_tx = encode::serialize(&transaction);
+        // In a single transaction,
+        let db_tx = self.client.transaction().await?;
 
-    // In a single transaction,
-    let db_tx = client.transaction().await?;
-
-    // insert the Spend transaction,
-    let statement = db_tx
-        .prepare_typed(
-            "INSERT INTO spend_txs (txid, transaction) VALUES ($1, $2) \
+        // insert the Spend transaction,
+        let statement = db_tx
+            .prepare_typed(
+                "INSERT INTO spend_txs (txid, transaction) VALUES ($1, $2) \
              ON CONFLICT DO NOTHING", // FIXME: we should make the error explicit
-            &[Type::BYTEA, Type::BYTEA],
-        )
-        .await?;
-    db_tx
-        .execute(&statement, &[&bitcoin_txid, &bitcoin_tx])
-        .await?;
+                &[Type::BYTEA, Type::BYTEA],
+            )
+            .await?;
+        db_tx
+            .execute(&statement, &[&bitcoin_txid, &bitcoin_tx])
+            .await?;
 
-    // as well as all vault outpoints it refers to
-    for outpoint in outpoints.iter() {
-        let statement = db_tx.prepare_typed(
+        // as well as all vault outpoints it refers to
+        for outpoint in outpoints.iter() {
+            let statement = db_tx.prepare_typed(
         "INSERT INTO spend_outpoints (deposit_txid, deposit_vout, spend_txid) VALUES ($1, $2, $3) \
          ON CONFLICT (deposit_txid, deposit_vout) DO UPDATE \
          SET deposit_txid = EXCLUDED.deposit_txid, \
@@ -229,83 +252,80 @@ pub async fn store_spend_tx(
              spend_txid = EXCLUDED.spend_txid",
         &[Type::BYTEA, Type::INT4, Type::BYTEA]
         ).await?;
-        db_tx
-            .execute(
-                &statement,
-                &[
-                    &outpoint.txid.as_ref(),
-                    &(outpoint.vout as i32),
-                    &bitcoin_txid,
-                ],
-            )
-            .await?;
+            db_tx
+                .execute(
+                    &statement,
+                    &[
+                        &outpoint.txid.as_ref(),
+                        &(outpoint.vout as i32),
+                        &bitcoin_txid,
+                    ],
+                )
+                .await?;
+        }
+
+        db_tx.commit().await
     }
 
-    db_tx.commit().await
-}
-
-pub async fn fetch_spend_tx(
-    config: &tokio_postgres::Config,
-    outpoint: &OutPoint,
-) -> Result<Option<BitcoinTransaction>, tokio_postgres::Error> {
-    let client = establish_connection(config).await?;
-
-    let statement = client
-        .prepare_typed(
-            "SELECT transaction FROM spend_txs as txs \
+    pub async fn fetch_spend_tx(
+        &self,
+        outpoint: &OutPoint,
+    ) -> Result<Option<BitcoinTransaction>, tokio_postgres::Error> {
+        let statement = self
+            .client
+            .prepare_typed(
+                "SELECT transaction FROM spend_txs as txs \
              INNER JOIN spend_outpoints as ops ON txs.txid = ops.spend_txid \
              WHERE ops.deposit_txid = $1 AND ops.deposit_vout = $2",
-            &[Type::BYTEA, Type::INT4],
-        )
-        .await?;
-    let spend_tx = client
-        .query(
-            &statement,
-            &[&outpoint.txid.as_ref(), &(outpoint.vout as i32)],
-        )
-        .await?
-        .get(0)
-        .map(|row| row.get::<_, Vec<u8>>(0));
+                &[Type::BYTEA, Type::INT4],
+            )
+            .await?;
+        let spend_tx = self
+            .client
+            .query(
+                &statement,
+                &[&outpoint.txid.as_ref(), &(outpoint.vout as i32)],
+            )
+            .await?
+            .get(0)
+            .map(|row| row.get::<_, Vec<u8>>(0));
 
-    Ok(spend_tx.map(|tx| encode::deserialize(&tx).expect("Added to DB with serialize()")))
-}
+        Ok(spend_tx.map(|tx| encode::deserialize(&tx).expect("Added to DB with serialize()")))
+    }
 
-pub async fn fetch_spend_txs_to_broadcast(
-    config: &tokio_postgres::Config,
-) -> Result<Vec<BitcoinTransaction>, tokio_postgres::Error> {
-    let client = establish_connection(config).await?;
+    pub async fn fetch_spend_txs_to_broadcast(
+        &self,
+    ) -> Result<Vec<BitcoinTransaction>, tokio_postgres::Error> {
+        let statement = self
+            .client
+            .prepare_typed(
+                "SELECT transaction FROM spend_txs WHERE broadcasted = FALSE",
+                &[],
+            )
+            .await?;
+        let spend_txs = self
+            .client
+            .query(&statement, &[])
+            .await?
+            .into_iter()
+            .map(|row| row.get::<_, Vec<u8>>(0))
+            .map(|tx| encode::deserialize(&tx).expect("Added to DB with serialize()"))
+            .collect();
 
-    let statement = client
-        .prepare_typed(
-            "SELECT transaction FROM spend_txs WHERE broadcasted = FALSE",
-            &[],
-        )
-        .await?;
-    let spend_txs = client
-        .query(&statement, &[])
-        .await?
-        .into_iter()
-        .map(|row| row.get::<_, Vec<u8>>(0))
-        .map(|tx| encode::deserialize(&tx).expect("Added to DB with serialize()"))
-        .collect();
+        Ok(spend_txs)
+    }
 
-    Ok(spend_txs)
-}
-
-pub async fn mark_broadcasted_spend(
-    config: &tokio_postgres::Config,
-    txid: &Txid,
-) -> Result<(), tokio_postgres::Error> {
-    let client = establish_connection(config).await?;
-
-    let statement = client
-        .prepare_typed(
-            "UPDATE spend_txs SET broadcasted = TRUE WHERE txid = $1",
-            &[Type::BYTEA],
-        )
-        .await?;
-    client.execute(&statement, &[&txid.as_ref()]).await?;
-    Ok(())
+    pub async fn mark_broadcasted_spend(&self, txid: &Txid) -> Result<(), tokio_postgres::Error> {
+        let statement = self
+            .client
+            .prepare_typed(
+                "UPDATE spend_txs SET broadcasted = TRUE WHERE txid = $1",
+                &[Type::BYTEA],
+            )
+            .await?;
+        self.client.execute(&statement, &[&txid.as_ref()]).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

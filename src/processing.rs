@@ -1,4 +1,4 @@
-use crate::db::{fetch_sigs, fetch_spend_tx, store_sig, store_spend_tx, DbError};
+use crate::db::{DbConnection, DbError};
 use revault_net::{
     bitcoin::{
         secp256k1::{PublicKey as SecpPubKey, Signature},
@@ -10,8 +10,8 @@ use revault_net::{
 use std::collections::BTreeMap;
 
 // Fetch the signatures from database for this txid
-async fn get_sigs(pg_config: &tokio_postgres::Config, params: &GetSigs) -> ResponseResult {
-    match fetch_sigs(pg_config, params.id).await {
+async fn get_sigs(conn: &DbConnection, params: &GetSigs) -> ResponseResult {
+    match conn.fetch_sigs(params.id).await {
         Ok(sigs) => ResponseResult::Sigs(sigs),
         Err(e) => {
             log::error!(
@@ -28,12 +28,12 @@ async fn get_sigs(pg_config: &tokio_postgres::Config, params: &GetSigs) -> Respo
 
 // Store this signature in the database
 async fn set_sig(
-    pg_config: &tokio_postgres::Config,
+    conn: &DbConnection,
     txid: Txid,
     pubkey: SecpPubKey,
     signature: Signature,
 ) -> ResponseResult {
-    match store_sig(&pg_config, txid, pubkey, signature).await {
+    match conn.store_sig(txid, pubkey, signature).await {
         Ok(()) => ResponseResult::Sig(SigResult { ack: true }),
         Err(DbError::Duplicate) => {
             log::info!(
@@ -53,11 +53,11 @@ async fn set_sig(
 
 // Fetch the signatures from database for this txid
 async fn set_spend_tx(
-    pg_config: &tokio_postgres::Config,
+    conn: &mut DbConnection,
     deposits: &Vec<OutPoint>,
     spend_tx: BitcoinTransaction,
 ) -> ResponseResult {
-    match store_spend_tx(pg_config, deposits, spend_tx).await {
+    match conn.store_spend_tx(deposits, spend_tx).await {
         Ok(()) => ResponseResult::SetSpend(SetSpendResult { ack: true }),
         Err(e) => {
             log::error!("Error while storing Spend tx: '{}'", e);
@@ -67,11 +67,8 @@ async fn set_spend_tx(
 }
 
 // Get this Spend tx from database, and on error log and returns None for now (FIXME!).
-async fn get_spend_tx(
-    pg_config: &tokio_postgres::Config,
-    deposit: &OutPoint,
-) -> Option<ResponseResult> {
-    match fetch_spend_tx(pg_config, deposit).await {
+async fn get_spend_tx(conn: &DbConnection, deposit: &OutPoint) -> Option<ResponseResult> {
+    match conn.fetch_spend_tx(deposit).await {
         Ok(transaction) => Some(ResponseResult::SpendTx(SpendTx { transaction })),
         Err(e) => {
             log::error!("Error while fetching Spend tx: '{}'", e);
@@ -90,19 +87,19 @@ pub enum MessageSender {
 
 /// Read a message from this stream, and process it depending on the sender.
 pub async fn read_req(
-    pg_config: &tokio_postgres::Config,
+    conn: &mut DbConnection,
     stream: &mut KKTransport,
     sender: MessageSender,
 ) -> Result<(), revault_net::Error> {
     log::trace!("Reading a new message from '{:?}'", sender);
 
     stream
-        .read_req_async(|req_params| process_request(&pg_config, sender, req_params))
+        .read_req_async(|req_params| process_request(conn, sender, req_params))
         .await
 }
 
 pub async fn process_request(
-    pg_config: &tokio_postgres::Config,
+    conn: &mut DbConnection,
     sender: MessageSender,
     req_params: RequestParams,
 ) -> Option<ResponseResult> {
@@ -115,7 +112,7 @@ pub async fn process_request(
                     | MessageSender::StakeHolder
                     | MessageSender::ManagerStakeholder
             ) {
-                Some(get_sigs(pg_config, msg).await)
+                Some(get_sigs(conn, msg).await)
             } else {
                 log::error!("Unexpected get_sigs '{:?}' from '{:?}'", req_params, sender);
                 None
@@ -131,7 +128,7 @@ pub async fn process_request(
                 sender,
                 MessageSender::StakeHolder | MessageSender::ManagerStakeholder
             ) {
-                Some(set_sig(pg_config, id, pubkey, signature).await)
+                Some(set_sig(conn, id, pubkey, signature).await)
             } else {
                 log::error!("Unexpected sig '{:?}' from '{:?}'", req_params, sender);
                 None
@@ -143,7 +140,7 @@ pub async fn process_request(
                 sender,
                 MessageSender::Manager | MessageSender::ManagerStakeholder
             ) {
-                Some(set_spend_tx(pg_config, &msg.deposit_outpoints.clone(), msg.spend_tx()).await)
+                Some(set_spend_tx(conn, &msg.deposit_outpoints.clone(), msg.spend_tx()).await)
             } else {
                 log::error!("Unexpected set_spend_tx from '{:?}'", sender);
                 None
@@ -153,7 +150,7 @@ pub async fn process_request(
         // TODO: we may have to accept it from wallets too, as they may want to inspect it too.
         RequestParams::GetSpendTx(GetSpendTx { deposit_outpoint }) => {
             if matches!(sender, MessageSender::WatchTower) {
-                get_spend_tx(pg_config, &deposit_outpoint).await
+                get_spend_tx(conn, &deposit_outpoint).await
             } else {
                 log::error!(
                     "Unexpected get_spend_tx '{:?}' from '{:?}'",
@@ -255,6 +252,7 @@ mod tests {
     }
 
     async fn sig_exchange(pg_config: &tokio_postgres::Config) {
+        let db_conn = DbConnection::new(pg_config).await.unwrap();
         let signature_a = Signature::from_compact(&[
             0xdc, 0x4d, 0xc2, 0x64, 0xa9, 0xfe, 0xf1, 0x7a, 0x3f, 0x25, 0x34, 0x49, 0xcf, 0x8c,
             0x39, 0x7a, 0xb6, 0xf1, 0x6f, 0xb3, 0xd6, 0x3d, 0x86, 0x94, 0x0b, 0x55, 0x86, 0x82,
@@ -273,8 +271,9 @@ mod tests {
         let txid_a =
             Txid::from_hex("264595a4ace1865dfa442bb923320b8f00413711655165ac13a470db2c5384c0")
                 .unwrap();
+
         assert_eq!(
-            set_sig(pg_config, txid_a, pubkey_a, signature_a.clone()).await,
+            set_sig(&db_conn, txid_a, pubkey_a, signature_a.clone()).await,
             ResponseResult::Sig(SigResult { ack: true })
         );
 
@@ -287,7 +286,7 @@ mod tests {
                 .unwrap();
         let signature_b = Signature::from_str("304402204b0ab8a7d95d5b67d5c1b8584a3075adcac787a315f79a9b52b5a736909c975502206def9036d3d980a7cb66f2baa64ebdcd6648d70b324c6c18c349fa240dd07ca8").unwrap();
         assert_eq!(
-            set_sig(pg_config, txid_b, pubkey_b, signature_b.clone()).await,
+            set_sig(&db_conn, txid_b, pubkey_b, signature_b.clone()).await,
             ResponseResult::Sig(SigResult { ack: true })
         );
 
@@ -295,7 +294,7 @@ mod tests {
         let mut signatures_a = BTreeMap::new();
         signatures_a.insert(pubkey_a, signature_a);
         assert_eq!(
-            get_sigs(pg_config, &GetSigs { id: txid_a }).await,
+            get_sigs(&db_conn, &GetSigs { id: txid_a }).await,
             ResponseResult::Sigs(Sigs {
                 signatures: signatures_a.clone()
             })
@@ -304,7 +303,7 @@ mod tests {
         let mut signatures_b = BTreeMap::new();
         signatures_b.insert(pubkey_b, signature_b);
         assert_eq!(
-            get_sigs(pg_config, &GetSigs { id: txid_b }).await,
+            get_sigs(&db_conn, &GetSigs { id: txid_b }).await,
             ResponseResult::Sigs(Sigs {
                 signatures: signatures_b.clone()
             })
@@ -313,7 +312,7 @@ mod tests {
         // We can store a different signature for the same pubkey...
         let another_sig_a = Signature::from_str("304402201a3109a4a6445c1e56416bc39520aada5c8ad089e69ee4f1a40a0901de1a435302204b281ba97da2ab2e40eb65943ae414cc4307406c5eb177b1c646606839a2e99d").unwrap();
         assert_eq!(
-            set_sig(pg_config, txid_a, pubkey_a, another_sig_a.clone()).await,
+            set_sig(&db_conn, txid_a, pubkey_a, another_sig_a.clone()).await,
             ResponseResult::Sig(SigResult { ack: true })
         );
 
@@ -321,7 +320,7 @@ mod tests {
         let mut signatures_a = BTreeMap::new();
         signatures_a.insert(pubkey_a, another_sig_a);
         assert_eq!(
-            get_sigs(pg_config, &GetSigs { id: txid_a }).await,
+            get_sigs(&db_conn, &GetSigs { id: txid_a }).await,
             ResponseResult::Sigs(Sigs {
                 signatures: signatures_a.clone()
             })
@@ -334,7 +333,7 @@ mod tests {
         .unwrap();
         let signature_c = Signature::from_str("304402201fbe986a41b69ea65bbb94a042cb6a5edacb898f290c76d76deb5d74241d0309022065d5ad54a36962b75857ce22ddf2189e71e5a0fe6df6e6d5d0c8acdb59e16374").unwrap();
         assert_eq!(
-            set_sig(pg_config, txid_b, pubkey_c, signature_c.clone()).await,
+            set_sig(&db_conn, txid_b, pubkey_c, signature_c.clone()).await,
             ResponseResult::Sig(SigResult { ack: true })
         );
 
@@ -344,14 +343,14 @@ mod tests {
         .unwrap();
         let signature_d = Signature::from_str("30440220197a312ee648b762ed795c686217f79b1b825d80bfb87f7c5e387cd713e3a026022077fb9114caafcd6a0d2362cb4eaddb19b5ea8c0fb37b257338d4dfbce239ee9e").unwrap();
         assert_eq!(
-            set_sig(pg_config, txid_b, pubkey_d, signature_d.clone()).await,
+            set_sig(&db_conn, txid_b, pubkey_d, signature_d.clone()).await,
             ResponseResult::Sig(SigResult { ack: true })
         );
 
         signatures_b.insert(pubkey_c, signature_c);
         signatures_b.insert(pubkey_d, signature_d);
         assert_eq!(
-            get_sigs(pg_config, &GetSigs { id: txid_b }).await,
+            get_sigs(&db_conn, &GetSigs { id: txid_b }).await,
             ResponseResult::Sigs(Sigs {
                 signatures: signatures_b.clone()
             })
@@ -359,6 +358,7 @@ mod tests {
     }
 
     async fn spend_tx_exchange(pg_config: &tokio_postgres::Config) {
+        let mut db_conn = DbConnection::new(pg_config).await.unwrap();
         let spend_psbt_str = "\"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\"";
         let spend_tx: SpendTransaction = serde_json::from_str(&spend_psbt_str).unwrap();
         let spend_tx = spend_tx.into_psbt().extract_tx();
@@ -369,18 +369,18 @@ mod tests {
 
         // We still haven't stored the spend
         let deposit_outpoint = deposit_outpoints[0];
-        let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
+        let received = get_spend_tx(&db_conn, &deposit_outpoint).await.unwrap();
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx { transaction: None })
         );
 
         assert_eq!(
-            set_spend_tx(pg_config, &deposit_outpoints, spend_tx.clone()).await,
+            set_spend_tx(&mut db_conn, &deposit_outpoints, spend_tx.clone()).await,
             ResponseResult::SetSpend(SetSpendResult { ack: true })
         );
 
-        let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
+        let received = get_spend_tx(&db_conn, &deposit_outpoint).await.unwrap();
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx {
@@ -400,14 +400,14 @@ mod tests {
         ];
         assert_eq!(
             set_spend_tx(
-                pg_config,
+                &mut db_conn,
                 &conflicting_deposit_outpoints,
                 second_spend_tx.clone()
             )
             .await,
             ResponseResult::SetSpend(SetSpendResult { ack: true })
         );
-        let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
+        let received = get_spend_tx(&db_conn, &deposit_outpoint).await.unwrap();
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx {
@@ -419,14 +419,14 @@ mod tests {
         // FIXME: it should err explicitly
         assert_eq!(
             set_spend_tx(
-                pg_config,
+                &mut db_conn,
                 &conflicting_deposit_outpoints,
                 second_spend_tx.clone()
             )
             .await,
             ResponseResult::SetSpend(SetSpendResult { ack: true })
         );
-        let received = get_spend_tx(pg_config, &deposit_outpoint).await.unwrap();
+        let received = get_spend_tx(&db_conn, &deposit_outpoint).await.unwrap();
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx {

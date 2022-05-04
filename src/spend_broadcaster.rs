@@ -1,6 +1,6 @@
 use crate::{
     bitcoind::{BitcoinD, BitcoindError},
-    db::{fetch_spend_txs_to_broadcast, mark_broadcasted_spend},
+    db::DbConnection,
 };
 use jsonrpc::error::{Error, RpcError};
 
@@ -8,11 +8,13 @@ pub async fn spend_broadcaster(
     bitcoind: BitcoinD,
     config: &tokio_postgres::Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let db_conn = DbConnection::new(config).await?;
     let mut interval = tokio::time::interval(bitcoind.broadcast_interval);
+
     loop {
         interval.tick().await;
         log::debug!("Trying to broadcast spend txs...");
-        let spend_txs = match fetch_spend_txs_to_broadcast(&config).await {
+        let spend_txs = match db_conn.fetch_spend_txs_to_broadcast().await {
             Ok(s) => s,
             Err(e) => {
                 log::error!("Error while fetching txs: {}", e);
@@ -29,7 +31,7 @@ pub async fn spend_broadcaster(
                 Ok(_) | Err(BitcoindError::Server(Error::Rpc(RpcError { code: -27, .. }))) => {
                     // Either it's all good or the tx is already in blockchain,
                     // we mark it as broadcasted and be done
-                    mark_broadcasted_spend(&config, &spend_tx.txid()).await?;
+                    db_conn.mark_broadcasted_spend(&spend_tx.txid()).await?;
                     log::info!("Spend tx '{}' is broadcasted", spend_tx.txid());
                 }
                 Err(e) => {
