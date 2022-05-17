@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 // Fetch the signatures from database for this txid
 async fn get_sigs(conn: &DbConnection, params: &GetSigs) -> ResponseResult {
-    match conn.fetch_sigs(params.id).await {
+    match conn.fetch_sigs(params.txid).await {
         Ok(sigs) => ResponseResult::Sigs(sigs),
         Err(e) => {
             log::error!(
@@ -69,7 +69,7 @@ async fn set_spend_tx(
 // Get this Spend tx from database, and on error log and returns None for now (FIXME!).
 async fn get_spend_tx(conn: &DbConnection, deposit: &OutPoint) -> Option<ResponseResult> {
     match conn.fetch_spend_tx(deposit).await {
-        Ok(transaction) => Some(ResponseResult::SpendTx(SpendTx { transaction })),
+        Ok(spend_tx) => Some(ResponseResult::SpendTx(SpendTx { spend_tx })),
         Err(e) => {
             log::error!("Error while fetching Spend tx: '{}'", e);
             None
@@ -120,7 +120,7 @@ pub async fn process_request(
         }
         // The sig message can only be sent by a stakeholder's wallet
         RequestParams::CoordSig(Sig {
-            id,
+            txid,
             pubkey,
             signature,
         }) => {
@@ -128,7 +128,7 @@ pub async fn process_request(
                 sender,
                 MessageSender::StakeHolder | MessageSender::ManagerStakeholder
             ) {
-                Some(set_sig(conn, id, pubkey, signature).await)
+                Some(set_sig(conn, txid, pubkey, signature).await)
             } else {
                 log::error!("Unexpected sig '{:?}' from '{:?}'", req_params, sender);
                 None
@@ -294,7 +294,7 @@ mod tests {
         let mut signatures_a = BTreeMap::new();
         signatures_a.insert(pubkey_a, signature_a);
         assert_eq!(
-            get_sigs(&db_conn, &GetSigs { id: txid_a }).await,
+            get_sigs(&db_conn, &GetSigs { txid: txid_a }).await,
             ResponseResult::Sigs(Sigs {
                 signatures: signatures_a.clone()
             })
@@ -303,7 +303,7 @@ mod tests {
         let mut signatures_b = BTreeMap::new();
         signatures_b.insert(pubkey_b, signature_b);
         assert_eq!(
-            get_sigs(&db_conn, &GetSigs { id: txid_b }).await,
+            get_sigs(&db_conn, &GetSigs { txid: txid_b }).await,
             ResponseResult::Sigs(Sigs {
                 signatures: signatures_b.clone()
             })
@@ -320,7 +320,7 @@ mod tests {
         let mut signatures_a = BTreeMap::new();
         signatures_a.insert(pubkey_a, another_sig_a);
         assert_eq!(
-            get_sigs(&db_conn, &GetSigs { id: txid_a }).await,
+            get_sigs(&db_conn, &GetSigs { txid: txid_a }).await,
             ResponseResult::Sigs(Sigs {
                 signatures: signatures_a.clone()
             })
@@ -350,7 +350,7 @@ mod tests {
         signatures_b.insert(pubkey_c, signature_c);
         signatures_b.insert(pubkey_d, signature_d);
         assert_eq!(
-            get_sigs(&db_conn, &GetSigs { id: txid_b }).await,
+            get_sigs(&db_conn, &GetSigs { txid: txid_b }).await,
             ResponseResult::Sigs(Sigs {
                 signatures: signatures_b.clone()
             })
@@ -372,7 +372,7 @@ mod tests {
         let received = get_spend_tx(&db_conn, &deposit_outpoint).await.unwrap();
         assert_eq!(
             received,
-            ResponseResult::SpendTx(SpendTx { transaction: None })
+            ResponseResult::SpendTx(SpendTx { spend_tx: None })
         );
 
         assert_eq!(
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx {
-                transaction: Some(spend_tx)
+                spend_tx: Some(spend_tx)
             })
         );
 
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx {
-                transaction: Some(second_spend_tx.clone())
+                spend_tx: Some(second_spend_tx.clone())
             })
         );
 
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(
             received,
             ResponseResult::SpendTx(SpendTx {
-                transaction: Some(second_spend_tx)
+                spend_tx: Some(second_spend_tx)
             })
         );
     }
