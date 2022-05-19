@@ -1,11 +1,11 @@
 [package]
 name = "revault_coordinatord"
-version = "0.0.3"
+version = "0.4.0"
 authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
-revault_net = { git = "https://github.com/revault/revault_net", branch = "master" }
+revault_net = "0.3"
 
 tokio = { version = "1.0", features = ["io-util",  "macros", "net", "rt-multi-thread"] }
 
@@ -31,7 +31,7 @@ tokio-postgres = "0.7"
 jsonrpc = "0.12"
 
 [dev-dependencies]
-revault_tx = { version = "0.3", features = ["use-serde"] }
+revault_tx = { version = "0.5", features = ["use-serde"] }
 
 [features]
 fuzztesting = []
